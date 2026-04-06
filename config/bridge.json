@@ -1,0 +1,50 @@
+{
+  "workers": {
+    "openclaw": {
+      "enabled": true,
+      "max_concurrent": 5,
+      "description": "OpenClaw操作任务处理器"
+    },
+    "ai": {
+      "enabled": true,
+      "max_concurrent": 3,
+      "description": "AI模型调用任务处理器"
+    },
+    "script": {
+      "enabled": true,
+      "max_concurrent": 2,
+      "description": "本地脚本执行任务处理器"
+    },
+    "webhook": {
+      "enabled": true,
+      "max_concurrent": 10,
+      "description": "Webhook调用任务处理器"
+    }
+  },
+  "timeouts": {
+    "openclaw": 600,
+    "ai": 300,
+    "script": 1800,
+    "webhook": 60
+  },
+  "retry": {
+    "max_retries": 3,
+    "retry_delay": 5
+  },
+  "api": {
+    "host": "localhost",
+    "port": 9999,
+    "cors_enabled": true
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "logs/bridge.log",
+    "max_size": "10MB",
+    "backup_count": 5
+  },
+  "openclaw": {
+    "gateway_url": "ws://localhost:18789",
+    "config_path": "~/.openclaw/openclaw.json",
+    "agents_path": "~/.openclaw/agents"
+  }
+}

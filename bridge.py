@@ -12,11 +12,14 @@ import time
 import logging
 import asyncio
 import signal
+import random
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
 from enum import Enum
+import websockets
+import aiohttp
 
 # 配置日志
 logging.basicConfig(
@@ -68,11 +71,17 @@ class BridgeService:
         self.running = False
         self.workers = {}
         
+        # WebSocket 连接管理
+        self.ws_client = None
+        self.ws_connected = False
+        self.ws_reconnect_attempts = 0
+        self.node_id = f"bridge_client_{int(time.time())}"
+        
         # 确保必要目录存在
         os.makedirs('logs', exist_ok=True)
         os.makedirs('data/tasks', exist_ok=True)
         
-        logger.info("Bridge Service 初始化完成")
+        logger.info(f"Bridge Service 初始化完成 - Node ID: {self.node_id}")
 
     def _load_config(self) -> Dict[str, Any]:
         """加载配置文件"""
@@ -108,11 +117,12 @@ class BridgeService:
         self.running = True
         logger.info("Bridge Service 正在启动...")
         
-        # 启动各类型任务处理器
+        # 启动各类型任务处理器和 WebSocket 连接
         await asyncio.gather(
             self._start_task_processor(),
             self._start_status_monitor(),
-            self._start_cleanup_worker()
+            self._start_cleanup_worker(),
+            self._start_websocket_client()  # 新增 WebSocket 客户端
         )
 
     async def stop(self):
@@ -376,32 +386,69 @@ class BridgeService:
                 }
 
     async def _openclaw_send_message(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """OpenClaw发送消息"""
+        """通过 WebSocket 发送消息到 OpenClaw"""
         session_key = payload.get('session_key')
         message = payload.get('message')
         
-        # TODO: 实现OpenClaw消息发送逻辑
-        # 这里需要调用OpenClaw的内部API或WebSocket接口
+        if not self.ws_connected:
+            raise ConnectionError("WebSocket 连接未建立")
+            
+        ws_message = {
+            "type": "send_message",
+            "session_key": session_key,
+            "message": message,
+            "timestamp": time.time()
+        }
         
+        success = await self.send_websocket_message(ws_message)
+        if not success:
+            raise RuntimeError("发送 WebSocket 消息失败")
+            
         logger.info(f"发送消息到会话 {session_key}: {message}")
-        return {"status": "sent", "session_key": session_key}
+        return {"status": "sent", "session_key": session_key, "ws_connected": True}
 
     async def _openclaw_get_status(self) -> Dict[str, Any]:
-        """获取OpenClaw状态"""
-        # TODO: 实现OpenClaw状态查询逻辑
+        """获取 OpenClaw 状态"""
+        if not self.ws_connected:
+            return {
+                "status": "disconnected",
+                "ws_connected": False,
+                "reconnect_attempts": self.ws_reconnect_attempts
+            }
+            
+        ws_message = {
+            "type": "get_status",
+            "timestamp": time.time()
+        }
+        
+        success = await self.send_websocket_message(ws_message)
+        
         return {
-            "status": "running",
-            "agents": ["hc-coding"],
-            "sessions": 5,
-            "uptime": time.time()
+            "status": "connected" if success else "error",
+            "ws_connected": self.ws_connected,
+            "node_id": self.node_id,
+            "reconnect_attempts": self.ws_reconnect_attempts
         }
 
     async def _openclaw_manage_agent(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """OpenClaw Agent管理"""
+        """管理 OpenClaw Agent"""
         agent_id = payload.get('agent_id')
         action = payload.get('action')  # start, stop, restart, status
         
-        # TODO: 实现Agent管理逻辑
+        if not self.ws_connected:
+            raise ConnectionError("WebSocket 连接未建立")
+            
+        ws_message = {
+            "type": "manage_agent",
+            "agent_id": agent_id,
+            "action": action,
+            "timestamp": time.time()
+        }
+        
+        success = await self.send_websocket_message(ws_message)
+        if not success:
+            raise RuntimeError(f"Agent {action} 操作失败")
+            
         logger.info(f"Agent管理: {agent_id} - {action}")
         return {"agent_id": agent_id, "action": action, "status": "success"}
 
@@ -472,6 +519,180 @@ class BridgeService:
                 json.dump(task_data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"保存任务失败 {task.id}: {e}")
+
+    async def _start_websocket_client(self):
+        """启动 WebSocket 客户端连接"""
+        logger.info("WebSocket 客户端正在启动...")
+        
+        while self.running:
+            try:
+                await self._connect_websocket()
+            except Exception as e:
+                logger.error(f"WebSocket 客户端错误: {e}")
+                await asyncio.sleep(5)  # 等待5秒后重试
+
+    async def _connect_websocket(self):
+        """建立 WebSocket 连接并维持"""
+        gateway_url = self.config['openclaw']['gateway_url']
+        
+        # 指数退避重连机制
+        max_backoff = 300  # 最大5分钟
+        base_delay = 1
+        
+        while self.running:
+            try:
+                logger.info(f"正在连接到 WebSocket 网关: {gateway_url}")
+                
+                async with websockets.connect(
+                    gateway_url,
+                    ping_interval=20,  # 20秒 ping 间隔
+                    ping_timeout=10,   # 10秒 ping 超时
+                    close_timeout=10   # 10秒关闭超时
+                ) as websocket:
+                    self.ws_client = websocket
+                    self.ws_connected = True
+                    self.ws_reconnect_attempts = 0
+                    
+                    logger.info("✅ WebSocket 连接成功!")
+                    
+                    # 立即发送节点注册消息
+                    await self._register_node(websocket)
+                    
+                    # 启动心跳保活任务
+                    heartbeat_task = asyncio.create_task(
+                        self._websocket_heartbeat(websocket)
+                    )
+                    
+                    try:
+                        # 监听消息
+                        async for message in websocket:
+                            await self._handle_websocket_message(message)
+                    except websockets.exceptions.ConnectionClosed:
+                        logger.warning("WebSocket 连接已关闭")
+                    finally:
+                        heartbeat_task.cancel()
+                        self.ws_connected = False
+                        self.ws_client = None
+                        
+            except Exception as e:
+                self.ws_connected = False
+                self.ws_client = None
+                self.ws_reconnect_attempts += 1
+                
+                # 计算退避延迟
+                delay = min(base_delay * (2 ** self.ws_reconnect_attempts), max_backoff)
+                # 添加随机抖动防止雷群效应
+                jitter = random.uniform(0.5, 1.5)
+                actual_delay = delay * jitter
+                
+                logger.warning(
+                    f"WebSocket 连接失败 (第{self.ws_reconnect_attempts}次): {e}. "
+                    f"{actual_delay:.1f}秒后重试"
+                )
+                
+                await asyncio.sleep(actual_delay)
+                
+    async def _register_node(self, websocket):
+        """向服务器注册节点"""
+        register_msg = {
+            "type": "register",
+            "node_id": self.node_id,
+            "timestamp": time.time(),
+            "version": "1.0",
+            "capabilities": ["task_processing", "script_execution"]
+        }
+        
+        await websocket.send(json.dumps(register_msg))
+        logger.info(f"✨ 已发送节点注册: {self.node_id}")
+        
+    async def _websocket_heartbeat(self, websocket):
+        """心跳保活任务"""
+        logger.info("❤️ 心跳保活任务已启动")
+        
+        while self.running and self.ws_connected:
+            try:
+                await asyncio.sleep(20)  # 每20秒发送一次心跳
+                
+                if not self.ws_connected:
+                    break
+                    
+                ping_msg = {
+                    "type": "ping",
+                    "node_id": self.node_id,
+                    "timestamp": time.time()
+                }
+                
+                await websocket.send(json.dumps(ping_msg))
+                logger.debug(f"📡 已发送心跳: {self.node_id}")
+                
+            except websockets.exceptions.ConnectionClosed:
+                logger.warning("心跳任务: WebSocket 连接已关闭")
+                break
+            except Exception as e:
+                logger.error(f"心跳任务错误: {e}")
+                break
+                
+        logger.info("❤️ 心跳保活任务已停止")
+        
+    async def _handle_websocket_message(self, message):
+        """处理 WebSocket 消息"""
+        try:
+            data = json.loads(message)
+            msg_type = data.get('type')
+            
+            if msg_type == 'pong':
+                logger.debug(f"🏓 收到心跳响应: {data.get('node_id', 'unknown')}")
+            elif msg_type == 'task_request':
+                # 处理远程任务请求
+                await self._handle_remote_task_request(data)
+            elif msg_type == 'register_response':
+                logger.info(f"✅ 节点注册成功: {data.get('message', 'OK')}")
+            else:
+                logger.info(f"📨 收到消息: {message}")
+                
+        except json.JSONDecodeError:
+            logger.warning(f"无效的 JSON 消息: {message}")
+        except Exception as e:
+            logger.error(f"处理消息错误: {e}")
+            
+    async def _handle_remote_task_request(self, data):
+        """处理远程任务请求"""
+        try:
+            task_type = data.get('task_type')
+            payload = data.get('payload', {})
+            request_id = data.get('request_id')
+            
+            logger.info(f"收到远程任务请求: {task_type} (ID: {request_id})")
+            
+            # 提交任务到本地队列
+            task_id = await self.submit_task(task_type, payload)
+            
+            # 发送响应
+            response = {
+                "type": "task_response",
+                "request_id": request_id,
+                "task_id": task_id,
+                "status": "accepted"
+            }
+            
+            if self.ws_client:
+                await self.ws_client.send(json.dumps(response))
+                
+        except Exception as e:
+            logger.error(f"处理远程任务失败: {e}")
+
+    async def send_websocket_message(self, message: Dict[str, Any]) -> bool:
+        """发送 WebSocket 消息"""
+        if not self.ws_connected or not self.ws_client:
+            logger.warning("无法发送消息: WebSocket 未连接")
+            return False
+            
+        try:
+            await self.ws_client.send(json.dumps(message))
+            return True
+        except Exception as e:
+            logger.error(f"发送 WebSocket 消息失败: {e}")
+            return False
 
     def get_stats(self) -> Dict[str, Any]:
         """获取服务统计信息"""

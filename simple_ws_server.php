@@ -9,10 +9,10 @@ require_once __DIR__ . '/backend/vendor/autoload.php';
 
 use Workerman\Worker;
 
-echo "🚀 启动简化 WebSocket 服务器 (端口 8283)...\n";
+echo "🚀 启动简化 WebSocket 服务器 (端口 8282)...\n";
 
 // 创建简单的 WebSocket 服务器
-$worker = new Worker('websocket://0.0.0.0:8283');
+$worker = new Worker('websocket://0.0.0.0:8282');
 
 $worker->onConnect = function($connection) {
     echo "🔗 客户端连接: {$connection->id}\n";

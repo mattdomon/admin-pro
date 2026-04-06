@@ -43,7 +43,7 @@
     "backup_count": 5
   },
   "openclaw": {
-    "gateway_url": "ws://localhost:18789",
+    "gateway_url": "ws://localhost:8282",
     "config_path": "~/.openclaw/openclaw.json",
     "agents_path": "~/.openclaw/agents"
   }

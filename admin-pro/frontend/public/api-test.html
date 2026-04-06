@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>API 测试</title>
+</head>
+<body>
+    <h1>测试 API 连接</h1>
+    <button onclick="testAPI()">测试 OpenClaw Status API</button>
+    <div id="result"></div>
+
+    <script>
+    async function testAPI() {
+        const result = document.getElementById('result');
+        result.innerHTML = '<p>正在请求...</p>';
+        
+        try {
+            const response = await fetch('/api/openclaw/status');
+            const data = await response.json();
+            
+            result.innerHTML = `
+                <h3>✅ API 请求成功！</h3>
+                <p><strong>状态码:</strong> ${response.status}</p>
+                <p><strong>OpenClaw 在线:</strong> ${data.data.online ? '是' : '否'}</p>
+                <p><strong>版本:</strong> ${data.data.version}</p>
+                <p><strong>系统时间:</strong> ${data.data.system_time}</p>
+                <pre>${JSON.stringify(data, null, 2)}</pre>
+            `;
+        } catch (error) {
+            result.innerHTML = `
+                <h3>❌ API 请求失败</h3>
+                <p><strong>错误:</strong> ${error.message}</p>
+            `;
+        }
+    }
+    </script>
+</body>
+</html>

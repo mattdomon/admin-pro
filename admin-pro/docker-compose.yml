@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  # === 业务服务 ===
+  mysql:
+    image: mysql:8.0
+    container_name: admin-pro-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root123456
+      MYSQL_DATABASE: openclaw_admin
+      TZ: Asia/Shanghai
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+
+  redis:
+    image: redis:7-alpine
+    container_name: admin-pro-redis
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+
+  # === Python 客户端节点 (模拟3个节点并发) ===
+  client_node:
+    build:
+      context: ./client_node
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      SERVER_WS_URL: ws://host.docker.internal:8282
+      WORKSPACE_DIR: /app/workspace
+    volumes:
+      - node_workspace:/app/workspace
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+volumes:
+  mysql_data:
+  redis_data:
+  node_workspace:

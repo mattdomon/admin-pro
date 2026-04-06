@@ -1,0 +1,71 @@
+# Runtime files
+*.pid
+*.log
+daemon.log
+start.log
+
+# Dependencies
+backend/vendor/
+frontend/node_modules/
+frontend/dist/
+
+# Environment files
+.env
+.env.*
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Database files
+*.sql
+*.sqlite
+*.db
+
+# Sensitive configuration
+config/database.php
+config/secrets.php
+
+# Docker volumes
+mysql_data/
+redis_data/
+
+# Logs
+logs/
+*.log
+admin_*.log
+
+# Backup files
+*.bak
+*.backup
+
+# Test files
+test_*.php
+debug_*.php
+*_test.*
+
+# Runtime PID files
+.*.pid
+
+# Workerman logs and PID files
+workerman.*.pid
+workerman.log
+
+# Build artifacts
+build/
+dist/
+
+# Lock files that should be committed
+!package-lock.json
+!composer.lock

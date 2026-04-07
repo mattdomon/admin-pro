@@ -1,61 +1,61 @@
-import request from '@/utils/request'
+/**
+ * 监控相关API接口
+ * 支持实时数据获取和历史趋势分析
+ */
 
-// 系统监控API
-export function getSystemOverview() {
+import request from './request'
+
+// 获取监控数据趋势 (24小时内)
+export function getMonitorTrends(hours = 24) {
+  return request({
+    url: '/api/monitor/trends',
+    method: 'get',
+    params: { hours }
+  })
+}
+
+// 获取实时系统概览
+export function getMonitorOverview() {
   return request({
     url: '/api/monitor/overview',
     method: 'get'
   })
 }
 
-export function getDeviceHealth() {
+// 获取任务成功率统计
+export function getTaskStats(days = 7) {
   return request({
-    url: '/api/monitor/devices',
-    method: 'get'
-  })
-}
-
-export function getSystemReports(days = 7) {
-  return request({
-    url: '/api/monitor/reports',
+    url: '/api/monitor/taskStats',
     method: 'get',
     params: { days }
   })
 }
 
-export function getAlertRules() {
+// 保存监控指标 (内部使用，一般由bridge.py调用)
+export function saveMetrics(data) {
   return request({
-    url: '/api/monitor/alert-rules',
-    method: 'get'
+    url: '/api/monitor/saveMetrics',
+    method: 'post',
+    data
   })
 }
 
-export function runSystemCheck() {
-  return request({
-    url: '/api/monitor/check',
-    method: 'get'
-  })
-}
-
-// 告警管理API
-export function getAlertList(params) {
-  return request({
-    url: '/api/alerts/list',
-    method: 'get',
-    params
-  })
-}
-
-export function markAlertAsRead(id) {
-  return request({
-    url: `/api/alerts/${id}/read`,
-    method: 'post'
-  })
-}
-
-export function deleteAlert(id) {
-  return request({
-    url: `/api/alerts/${id}`,
-    method: 'delete'
-  })
+// WebSocket连接配置
+export const WEBSOCKET_CONFIG = {
+  // 监听系统指标广播的WebSocket地址
+  METRICS_WS_URL: 'ws://localhost:8282/bridge',
+  
+  // 重连配置
+  RECONNECT_ATTEMPTS: 5,
+  RECONNECT_INTERVAL: 3000, // 3秒
+  
+  // 心跳配置
+  HEARTBEAT_INTERVAL: 30000, // 30秒
+  
+  // 消息类型
+  MESSAGE_TYPES: {
+    SYS_METRICS: 'sys_metrics',
+    PING: 'ping',
+    PONG: 'pong'
+  }
 }

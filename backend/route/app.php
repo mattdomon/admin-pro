@@ -44,6 +44,14 @@ Route::group('api/openclaw', function () {
     Route::get('bridge/status', 'BridgeCtrl/getBridgeStatus');    // Bridge 状态
 });
 
+// 系统监控接口 - 新增监控面板功能
+Route::group('api/monitor', function () {
+    Route::post('saveMetrics', 'MonitorCtrl/saveMetrics');       // 保存监控数据 (由 bridge.py 调用)
+    Route::get('trends', 'MonitorCtrl/getTrends');               // 获取监控趋势数据
+    Route::get('overview', 'MonitorCtrl/getOverview');           // 获取系统概览
+    Route::get('taskStats', 'MonitorCtrl/getTaskStats');         // 获取任务统计
+});
+
 // OpenClaw 模型配置管理 - 直接读写 openclaw.json
 Route::group('api/openclaw/config', function () {
     Route::get('models', 'app\controller\openclaw\OpenClawConfig@index');

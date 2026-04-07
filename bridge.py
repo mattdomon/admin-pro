@@ -21,6 +21,14 @@ from enum import Enum
 import websockets
 import aiohttp
 
+# 系统监控相关
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    logger.warning("psutil not available, system metrics collection disabled")
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -77,11 +85,17 @@ class BridgeService:
         self.ws_reconnect_attempts = 0
         self.node_id = f"bridge_client_{int(time.time())}"
         
+        # 系统监控
+        self.metrics_enabled = PSUTIL_AVAILABLE
+        self.last_metrics = {}
+        
         # 确保必要目录存在
         os.makedirs('logs', exist_ok=True)
         os.makedirs('data/tasks', exist_ok=True)
         
         logger.info(f"Bridge Service 初始化完成 - Node ID: {self.node_id}")
+        if not self.metrics_enabled:
+            logger.warning("系统监控功能已禁用 - 请安装 psutil: pip install psutil")
 
     def _load_config(self) -> Dict[str, Any]:
         """加载配置文件"""
@@ -117,12 +131,13 @@ class BridgeService:
         self.running = True
         logger.info("Bridge Service 正在启动...")
         
-        # 启动各类型任务处理器和 WebSocket 连接
+        # 启动各类型任务处理器、WebSocket 连接和系统监控
         await asyncio.gather(
             self._start_task_processor(),
             self._start_status_monitor(),
             self._start_cleanup_worker(),
-            self._start_websocket_client()  # 新增 WebSocket 客户端
+            self._start_websocket_client(),  # WebSocket 客户端
+            self._collect_system_metrics()   # 系统监控采集器
         )
 
     async def stop(self):
@@ -520,6 +535,132 @@ class BridgeService:
             except Exception as e:
                 logger.error(f"清理工作器错误: {e}")
                 await asyncio.sleep(1800)  # 出错后30分钟重试
+
+    async def _collect_system_metrics(self):
+        """系统指标采集器 - 每5秒采集一次系统数据"""
+        if not self.metrics_enabled:
+            logger.info("系统监控已禁用 - psutil 不可用")
+            return
+            
+        logger.info("系统监控采集器已启动")
+        
+        while self.running:
+            try:
+                # 采集系统指标
+                cpu_percent = psutil.cpu_percent(interval=1)
+                memory = psutil.virtual_memory()
+                disk = psutil.disk_usage('/')
+                
+                # 网络IO (增量计算)
+                net_io = psutil.net_io_counters()
+                
+                # 计算网络速率 (需要上次数据)
+                net_speed = {"sent_per_sec": 0, "recv_per_sec": 0}
+                if hasattr(self, '_last_net_io'):
+                    time_delta = 5.0  # 5秒间隔
+                    sent_delta = net_io.bytes_sent - self._last_net_io.bytes_sent
+                    recv_delta = net_io.bytes_recv - self._last_net_io.bytes_recv
+                    net_speed = {
+                        "sent_per_sec": sent_delta / time_delta,
+                        "recv_per_sec": recv_delta / time_delta
+                    }
+                self._last_net_io = net_io
+                
+                # 组装监控数据
+                metrics = {
+                    "timestamp": time.time(),
+                    "cpu": {
+                        "usage_percent": round(cpu_percent, 2),
+                        "count": psutil.cpu_count()
+                    },
+                    "memory": {
+                        "total": memory.total,
+                        "used": memory.used, 
+                        "available": memory.available,
+                        "usage_percent": round(memory.percent, 2)
+                    },
+                    "disk": {
+                        "total": disk.total,
+                        "used": disk.used,
+                        "free": disk.free,
+                        "usage_percent": round((disk.used / disk.total) * 100, 2)
+                    },
+                    "network": {
+                        "bytes_sent": net_io.bytes_sent,
+                        "bytes_recv": net_io.bytes_recv,
+                        "sent_per_sec": round(net_speed["sent_per_sec"], 2),
+                        "recv_per_sec": round(net_speed["recv_per_sec"], 2)
+                    },
+                    "tasks": {
+                        "total": len(self.tasks),
+                        "running": sum(1 for t in self.tasks.values() if t.status == TaskStatus.RUNNING),
+                        "pending": sum(1 for t in self.tasks.values() if t.status == TaskStatus.PENDING),
+                        "completed": sum(1 for t in self.tasks.values() if t.status == TaskStatus.SUCCESS),
+                        "failed": sum(1 for t in self.tasks.values() if t.status == TaskStatus.FAILED)
+                    }
+                }
+                
+                self.last_metrics = metrics
+                
+                # 通过WebSocket广播给所有客户端
+                await self._broadcast_metrics(metrics)
+                
+                # 每分钟发送一次历史数据到后端 (用于持久化)
+                if int(time.time()) % 60 == 0:
+                    await self._save_metrics_to_backend(metrics)
+                
+                await asyncio.sleep(5)  # 5秒采集间隔
+                
+            except Exception as e:
+                logger.error(f"系统监控采集错误: {e}")
+                await asyncio.sleep(10)  # 出错后10秒重试
+
+    async def _broadcast_metrics(self, metrics: Dict[str, Any]):
+        """广播系统指标到WebSocket客户端"""
+        if not self.ws_connected or not self.ws_client:
+            return
+            
+        try:
+            message = {
+                "type": "sys_metrics",
+                "data": metrics,
+                "node_id": self.node_id
+            }
+            
+            await self.ws_client.send(json.dumps(message))
+            logger.debug(f"系统指标已广播: CPU {metrics['cpu']['usage_percent']}%")
+            
+        except Exception as e:
+            logger.error(f"指标广播失败: {e}")
+
+    async def _save_metrics_to_backend(self, metrics: Dict[str, Any]):
+        """发送监控数据到后端进行持久化存储"""
+        try:
+            # 发送到后端API进行数据库存储
+            async with aiohttp.ClientSession() as session:
+                backend_url = "http://localhost:8000/api/monitor/saveMetrics"
+                
+                # 简化数据结构，只保存关键指标用于趋势分析
+                payload = {
+                    "timestamp": int(metrics["timestamp"]),
+                    "cpu_percent": metrics["cpu"]["usage_percent"],
+                    "memory_percent": metrics["memory"]["usage_percent"],
+                    "disk_percent": metrics["disk"]["usage_percent"],
+                    "network_sent": metrics["network"]["sent_per_sec"],
+                    "network_recv": metrics["network"]["recv_per_sec"],
+                    "tasks_total": metrics["tasks"]["total"],
+                    "tasks_running": metrics["tasks"]["running"],
+                    "tasks_failed": metrics["tasks"]["failed"]
+                }
+                
+                async with session.post(backend_url, json=payload) as resp:
+                    if resp.status == 200:
+                        logger.debug("监控数据已保存到后端")
+                    else:
+                        logger.warning(f"监控数据保存失败: {resp.status}")
+                        
+        except Exception as e:
+            logger.error(f"监控数据保存到后端失败: {e}")
 
     async def _save_task(self, task: Task):
         """保存任务到磁盘"""

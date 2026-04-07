@@ -6,6 +6,8 @@ namespace app\controller;
 use think\Response;
 use think\Exception;
 use app\service\LogService;
+use app\model\NodeKey;
+use GatewayWorker\Lib\Gateway;
 
 /**
  * OpenClaw Bridge 任务管理控制器
@@ -25,19 +27,64 @@ class BridgeCtrl extends BaseController
     private const BRIDGE_PID_FILE = 'data/bridge.pid';
     
     /**
-     * 提交任务到bridge.py
+     * 提交任务到指定节点 (SaaS 靶向路由版)
+     *
+     * POST /api/openclaw/bridge/task
+     * Body:
+     * {
+     *   "target_node_key": "a1b2c3d4...",  // 必填：目标节点
+     *   "type": "script",
+     *   "payload": { "script_path": "demo.py", "params": {} }
+     * }
      */
     public function submitTask(): Response
     {
         try {
-            $type = $this->request->param('type', 'script');
+            $targetNodeKey = trim((string) $this->request->param('target_node_key', ''));
+            $type    = $this->request->param('type', 'script');
             $payload = $this->request->param('payload', []);
             
             // 验证参数
             if (empty($payload)) {
                 return $this->json(400, '任务payload不能为空');
             }
-            
+
+            // ── SaaS 靶向路由逻辑 ──────────────────────────────────
+            // 如果指定了 target_node_key，通过 Gateway 精准投递给对应节点
+            if (!empty($targetNodeKey)) {
+                // 验证节点存在且在线
+                $nodeRecord = NodeKey::where('node_key', $targetNodeKey)
+                                     ->where('status', NodeKey::STATUS_ONLINE)
+                                     ->find();
+                if (!$nodeRecord) {
+                    return $this->json(400, '目标节点不在线或不存在: ' . substr($targetNodeKey, 0, 8) . '...');
+                }
+
+                $taskId = $type . '_' . date('Ymd_His') . '_' . substr(uniqid(), -6);
+
+                $taskMessage = json_encode([
+                    'type'            => 'execute_task',
+                    'task_id'         => $taskId,
+                    'task_type'       => $type,
+                    'payload'         => $payload,
+                    'target_node_key' => $targetNodeKey,
+                    'dispatched_at'   => time(),
+                ], JSON_UNESCAPED_UNICODE);
+
+                // 初始化 Gateway 客户端（连接内部 Register）
+                Gateway::$registerAddress = config('worker_server.register_address', '127.0.0.1:1236');
+
+                // 靶向推送：只发给 node_key 对应的那一个连接
+                Gateway::sendToUid($targetNodeKey, $taskMessage);
+
+                return $this->json(200, '任务已下发到节点 ' . $nodeRecord->node_name, [
+                    'task_id'         => $taskId,
+                    'target_node_key' => $targetNodeKey,
+                    'target_node_name'=> $nodeRecord->node_name,
+                ]);
+            }
+            // ── 兼容旧逻辑：无 target_node_key 时走本地 bridge.py ─
+
             // 确保bridge.py正在运行
             if (!$this->isBridgeRunning()) {
                 return $this->json(500, 'Bridge服务未运行，请联系管理员');

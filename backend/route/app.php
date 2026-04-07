@@ -101,6 +101,14 @@ Route::group('api/agent', function () {
     Route::post('restart', 'AgentCtrl/restart');                  // 重启 Agent
 });
 
+// ===== SaaS 改造：节点凭证管理 =====
+Route::group('api/nodes', function () {
+    Route::post('generate', 'NodeKeyCtrl/generate');     // 生成节点凭证
+    Route::get('list', 'NodeKeyCtrl/list');              // 凭证列表
+    Route::delete(':id', 'NodeKeyCtrl/delete');          // 删除节点
+    Route::put(':id/name', 'NodeKeyCtrl/rename');        // 修改备注名
+});
+
 // ===== Sprint 2: 脚本管理系统 =====
 Route::group('api/script', function () {
     Route::get('list', 'ScriptCtrl/list');

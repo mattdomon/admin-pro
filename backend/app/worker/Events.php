@@ -3,38 +3,77 @@ declare(strict_types=1);
 
 namespace app\worker;
 
-use app\model\Device;
-use app\model\Task as TaskModel;
+use app\model\NodeKey;
+use app\model\AdminUser;
 use Workerman\Worker;
+use Workerman\Timer;
 use GatewayWorker\Lib\Gateway;
 
 /**
- * GatewayWorker 事件处理
- * 
- * 处理客户端节点的 WebSocket 连接、认证、心跳、任务分发
+ * GatewayWorker 事件处理 - SaaS 改造版
+ *
+ * 核心变化：
+ * 1. 强制首包鉴权 (node_key)，3秒超时断连
+ * 2. 内存映射 $connections[$user_id][$node_key] = $clientId
+ * 3. 废弃全局广播，改为靶向路由 (target_node_key)
+ * 4. node_online / node_offline 事件推送给该用户的 Web 前端
  */
 class Events
 {
     /**
-     * 心跳间隔: 15 秒
+     * 鉴权等待超时（秒）：收到连接后若 3 秒内未发鉴权包则断开
      */
-    private const HEARTBEAT_INTERVAL = 15;
+    private const AUTH_TIMEOUT = 3;
 
     /**
-     * 节点离线判定: 超过 3 次心跳未收到
+     * 心跳超时（秒）：超过此时间未收到心跳则标记离线
      */
-    private const OFFLINE_THRESHOLD = 3;
+    private const HEARTBEAT_TIMEOUT = 60;
+
+    /**
+     * 节点连接映射（内存）
+     *
+     * 结构：
+     *   $nodeConnections[$node_key] = $clientId      // 节点客户端
+     *   $webConnections[$user_id][]  = $clientId      // Web 前端客户端
+     *
+     * 注意：BusinessWorker 多进程，此数组仅在当前 Worker 进程内有效。
+     * 对于精确靶向推送，我们使用 Gateway::bindUid 绑定 node_key 作为 UID，
+     * 从而让 Gateway 进程路由到正确连接。
+     */
+    private static array $pendingAuth = []; // $clientId => timer_id（等待鉴权定时器）
+
+    // ─────────────────────────────────────────
+    // GatewayWorker 标准事件
+    // ─────────────────────────────────────────
 
     /**
      * 客户端连接时触发
+     * 立即设置 3 秒鉴权超时定时器
      */
     public static function onConnect(string $clientId): void
     {
-        trace("客户端连接: {$clientId}", 'info');
+        trace("[Gateway] 新连接: {$clientId}", 'info');
+
+        // 发送欢迎包，要求鉴权
         Gateway::sendToClient($clientId, json_encode([
-            'action' => 'welcome',
-            'message' => 'Connected to OpenClaw-Admin'
+            'type'    => 'require_auth',
+            'message' => '请在 3 秒内发送鉴权包: {"type":"auth","node_key":"xxx"}',
         ]));
+
+        // 设置 3 秒超时定时器
+        $timerId = Timer::add(self::AUTH_TIMEOUT, function () use ($clientId) {
+            // 超时仍未鉴权，断开连接
+            trace("[Gateway] 鉴权超时，断开连接: {$clientId}", 'warning');
+            Gateway::sendToClient($clientId, json_encode([
+                'type'  => 'auth_timeout',
+                'error' => '鉴权超时，连接已关闭',
+            ]));
+            Gateway::closeClient($clientId);
+            unset(self::$pendingAuth[$clientId]);
+        }, [], false); // false = 只触发一次
+
+        self::$pendingAuth[$clientId] = $timerId;
     }
 
     /**
@@ -43,20 +82,39 @@ class Events
     public static function onMessage(string $clientId, string $message): void
     {
         $data = json_decode($message, true);
-        if (!$data) {
-            Gateway::sendToClient($clientId, json_encode(['error' => 'Invalid JSON']));
+        if (!is_array($data)) {
+            Gateway::sendToClient($clientId, json_encode([
+                'type'  => 'error',
+                'error' => 'Invalid JSON',
+            ]));
             return;
         }
 
-        $action = $data['action'] ?? '';
+        $type = $data['type'] ?? ($data['action'] ?? '');
 
-        match ($action) {
-            'auth'      => self::handleAuth($clientId, $data),
-            'ping'      => self::handlePing($clientId, $data),
-            'cot_logs'  => self::handleLogs($clientId, $data),
-            'task_result' => self::handleTaskResult($clientId, $data),
-            'task_killed' => self::handleTaskKilled($clientId, $data),
-            default     => trace("未知 action: {$action} from {$clientId}", 'warning'),
+        // 未鉴权的连接，只处理 auth 包
+        if (isset(self::$pendingAuth[$clientId])) {
+            if ($type === 'auth') {
+                self::handleAuth($clientId, $data);
+            } else {
+                // 非 auth 包但还未鉴权，直接拒绝
+                Gateway::sendToClient($clientId, json_encode([
+                    'type'  => 'auth_required',
+                    'error' => '请先发送鉴权包',
+                ]));
+            }
+            return;
+        }
+
+        // 已鉴权，正常处理
+        match ($type) {
+            'ping'          => self::handlePing($clientId, $data),
+            'task_result'   => self::handleTaskResult($clientId, $data),
+            'task_progress' => self::handleTaskProgress($clientId, $data),
+            'task_killed'   => self::handleTaskKilled($clientId, $data),
+            'web_register'  => self::handleWebRegister($clientId, $data), // Web 前端注册
+            'cot_logs'      => self::handleLogs($clientId, $data),
+            default         => trace("[Gateway] 未知 type: {$type} from {$clientId}", 'warning'),
         };
     }
 
@@ -65,125 +123,281 @@ class Events
      */
     public static function onClose(string $clientId): void
     {
-        // 检查是否有绑定的 UUID
-        $uuid = Gateway::getUidByClientId($clientId);
-        if ($uuid) {
-            Gateway::unbindUid($clientId);
-            Device::where('uuid', $uuid)->update([
-                'status' => 0,  // 离线
+        // 清理未完成的鉴权定时器
+        if (isset(self::$pendingAuth[$clientId])) {
+            Timer::del(self::$pendingAuth[$clientId]);
+            unset(self::$pendingAuth[$clientId]);
+            return;
+        }
+
+        // 获取绑定的 UID（node_key 或 web:{user_id}:{clientId}）
+        $uid = Gateway::getUidByClientId($clientId);
+        if (!$uid) return;
+
+        Gateway::unbindUid($clientId, $uid);
+
+        // 判断是节点还是 Web 前端
+        if (str_starts_with($uid, 'web:')) {
+            trace("[Gateway] Web前端断开: uid={$uid}", 'info');
+            return;
+        }
+
+        // 节点断开：更新数据库状态，广播 node_offline
+        $nodeKey = $uid;
+        $record  = NodeKey::where('node_key', $nodeKey)->find();
+        if ($record) {
+            $record->save([
+                'status'         => NodeKey::STATUS_OFFLINE,
                 'last_heartbeat' => time(),
             ]);
-            trace("节点 {$uuid} 断开连接 (clientId: {$clientId})", 'warning');
+
+            trace("[Gateway] 节点离线: node_key={$nodeKey}, user_id={$record->user_id}", 'warning');
+
+            // 向该用户所有 Web 前端广播 node_offline
+            self::broadcastToUserWebs($record->user_id, [
+                'type'      => 'node_offline',
+                'node_key'  => $nodeKey,
+                'node_name' => $record->node_name,
+                'user_id'   => $record->user_id,
+                'timestamp' => time(),
+            ]);
         }
     }
 
     /**
-     * 处理节点认证
+     * Worker 启动时触发（BusinessWorker）
+     */
+    public static function onWorkerStart(Worker $worker): void
+    {
+        trace("[Gateway] BusinessWorker {$worker->id} 启动", 'info');
+    }
+
+    // ─────────────────────────────────────────
+    // 核心处理方法
+    // ─────────────────────────────────────────
+
+    /**
+     * 处理节点鉴权
+     *
+     * 期望格式：
+     * {"type": "auth", "node_key": "a1b2c3d4...（32位）"}
      */
     private static function handleAuth(string $clientId, array $data): void
     {
-        $uuid    = $data['uuid'] ?? '';
-        $token   = $data['token'] ?? '';
+        $nodeKey = trim((string) ($data['node_key'] ?? ''));
 
-        if (empty($uuid)) {
-            Gateway::sendToClient($clientId, json_encode(['action' => 'auth_failed', 'reason' => 'uuid required']));
+        // 基本格式校验
+        if (empty($nodeKey) || strlen($nodeKey) !== 32) {
+            trace("[Gateway] 鉴权失败，无效 node_key: {$clientId}", 'warning');
+            Gateway::sendToClient($clientId, json_encode([
+                'type'  => 'auth_failed',
+                'error' => 'node_key 无效（必须为 32 位字符串）',
+            ]));
             Gateway::closeClient($clientId);
+            if (isset(self::$pendingAuth[$clientId])) {
+                Timer::del(self::$pendingAuth[$clientId]);
+                unset(self::$pendingAuth[$clientId]);
+            }
             return;
         }
 
-        // 查找或注册设备
-        $device = Device::where('uuid', $uuid)->find();
-        if (!$device) {
-            // 自动注册新节点
-            $device = Device::create([
-                'uuid'   => $uuid,
-                'name'   => $uuid,
-                'token'  => $token ?: bin2hex(random_bytes(16)),
-                'status' => 1,  // 在线
-            ]);
-            trace("新节点自动注册: {$uuid}", 'info');
-        } else {
-            $device->save(['status' => 1, 'last_heartbeat' => time()]);
-            trace("节点重连: {$uuid}", 'info');
+        // 查询数据库
+        $record = NodeKey::where('node_key', $nodeKey)->find();
+        if (!$record) {
+            trace("[Gateway] 鉴权失败，node_key 不存在: {$nodeKey}", 'warning');
+            Gateway::sendToClient($clientId, json_encode([
+                'type'  => 'auth_failed',
+                'error' => 'node_key 不存在或已被删除',
+            ]));
+            Gateway::closeClient($clientId);
+            if (isset(self::$pendingAuth[$clientId])) {
+                Timer::del(self::$pendingAuth[$clientId]);
+                unset(self::$pendingAuth[$clientId]);
+            }
+            return;
         }
 
-        // 绑定 UID
-        Gateway::bindUid($clientId, $uuid);
+        // 鉴权成功 ✅
+        // 1. 取消超时定时器
+        if (isset(self::$pendingAuth[$clientId])) {
+            Timer::del(self::$pendingAuth[$clientId]);
+            unset(self::$pendingAuth[$clientId]);
+        }
+
+        // 2. 绑定 UID = node_key（精准靶向路由的关键）
+        Gateway::bindUid($clientId, $nodeKey);
+
+        // 3. 更新数据库：状态改为 online
+        $record->save([
+            'status'         => NodeKey::STATUS_ONLINE,
+            'last_heartbeat' => time(),
+        ]);
+
+        trace("[Gateway] 节点上线: node_key={$nodeKey}, user_id={$record->user_id}, node_name={$record->node_name}", 'info');
+
+        // 4. 回复鉴权成功
+        Gateway::sendToClient($clientId, json_encode([
+            'type'      => 'auth_ok',
+            'node_key'  => $nodeKey,
+            'node_name' => $record->node_name,
+            'message'   => '鉴权成功，节点已上线',
+        ]));
+
+        // 5. 向该用户所有 Web 前端广播 node_online
+        self::broadcastToUserWebs($record->user_id, [
+            'type'      => 'node_online',
+            'node_key'  => $nodeKey,
+            'node_name' => $record->node_name,
+            'user_id'   => $record->user_id,
+            'timestamp' => time(),
+        ]);
+    }
+
+    /**
+     * 处理 Web 前端注册
+     *
+     * Web 浏览器连接后发送：
+     * {"type": "web_register", "token": "xxx"}
+     * 绑定 UID = "web:{user_id}"，用于接收 node_online/node_offline 事件
+     */
+    private static function handleWebRegister(string $clientId, array $data): void
+    {
+        $token = trim((string) ($data['token'] ?? ''));
+        if (empty($token)) {
+            Gateway::sendToClient($clientId, json_encode([
+                'type'  => 'error',
+                'error' => 'token 不能为空',
+            ]));
+            return;
+        }
+
+        // 验证 Token（从 ThinkPHP cache 中读取）
+        $cacheKey = "token:{$token}";
+        $userInfo = cache($cacheKey);
+        if (!is_array($userInfo) || empty($userInfo['user_id'])) {
+            Gateway::sendToClient($clientId, json_encode([
+                'type'  => 'error',
+                'error' => 'Token 无效或已过期',
+            ]));
+            return;
+        }
+
+        $userId = $userInfo['user_id'];
+
+        // 绑定 UID = "web:{user_id}"（一个用户可多个 Tab，所以用 group 概念）
+        $uid = "web:{$userId}";
+        Gateway::bindUid($clientId, $uid);
+
+        trace("[Gateway] Web前端注册: user_id={$userId}, clientId={$clientId}", 'info');
+
+        // 返回当前用户的所有节点在线状态
+        $nodes = NodeKey::where('user_id', $userId)
+                        ->field('node_key, node_name, status, last_heartbeat')
+                        ->select()
+                        ->toArray();
 
         Gateway::sendToClient($clientId, json_encode([
-            'action'  => 'auth_ok',
-            'message' => 'Authentication successful',
+            'type'  => 'web_registered',
+            'nodes' => $nodes,
         ]));
     }
 
     /**
      * 处理心跳
+     *
+     * {"type": "ping", "cpu": "25.3", "mem": "60.1"}
      */
     private static function handlePing(string $clientId, array $data): void
     {
-        $uuid = Gateway::getUidByClientId($clientId);
-        if (!$uuid) return;
+        $nodeKey = Gateway::getUidByClientId($clientId);
+        if (!$nodeKey || str_starts_with($nodeKey, 'web:')) return;
 
-        $update = [
-            'last_heartbeat' => time(),
-        ];
+        $update = ['last_heartbeat' => time()];
 
-        if (isset($data['cpu'])) {
-            $update['sys_info'] = [
-                'cpu' => $data['cpu'] ?? '',
-                'mem' => $data['mem'] ?? '',
-            ];
+        if (isset($data['cpu']) || isset($data['mem'])) {
+            $update['sys_info'] = json_encode([
+                'cpu' => $data['cpu'] ?? null,
+                'mem' => $data['mem'] ?? null,
+            ]);
         }
 
-        Device::where('uuid', $uuid)->update($update);
+        NodeKey::where('node_key', $nodeKey)->update($update);
+
+        Gateway::sendToClient($clientId, json_encode(['type' => 'pong']));
     }
 
     /**
-     * 处理日志回传
+     * 靶向任务下发（供 PHP 业务调用）
+     *
+     * 通过 Gateway::sendToUid($node_key, $message) 精准推送到对应节点
+     * 调用方式示例（BridgeCtrl.php）：
+     *   Gateway::sendToUid($targetNodeKey, json_encode([...task...]));
      */
-    private static function handleLogs(string $clientId, array $data): void
-    {
-        $taskId = $data['task_id'] ?? '';
-        $logs   = $data['logs'] ?? [];
-
-        if (empty($taskId) || empty($logs)) return;
-
-        $task = TaskModel::where('id', $taskId)->find();
-        if ($task) {
-            // 日志追加到 error_traceback (简化存储，生产环境可改为独立日志表)
-            $existing = $task->error_traceback ?? '';
-            foreach ($logs as $log) {
-                $line = "[{$log['level']}] {$log['msg']}" . PHP_EOL;
-                $existing .= $line;
-            }
-            $task->save(['error_traceback' => $existing]);
-        }
-    }
 
     /**
-     * 处理任务结果
+     * 处理任务执行结果（节点上报）
+     *
+     * {"type": "task_result", "task_id": "xxx", "status": "completed", "output": "..."}
      */
     private static function handleTaskResult(string $clientId, array $data): void
     {
-        $taskId = $data['task_id'] ?? '';
-        $status = $data['status'] ?? 'failed';
-        $returnCode = $data['return_code'] ?? null;
-        $error = $data['error'] ?? null;
+        $taskId    = $data['task_id'] ?? '';
+        $status    = $data['status'] ?? 'failed';
+        $output    = $data['output'] ?? '';
+        $error     = $data['error'] ?? null;
+        $nodeKey   = Gateway::getUidByClientId($clientId);
 
         if (empty($taskId)) return;
 
-        $task = TaskModel::where('id', $taskId)->find();
-        if ($task) {
-            $update = [
-                'status'      => $status,
-                'finished_at' => date('Y-m-d H:i:s'),
-            ];
-            if ($error) {
-                $update['error_traceback'] = $error;
-            }
-            $task->save($update);
+        // 更新数据库任务状态
+        \app\model\Task::where('id', $taskId)->update([
+            'status'          => $status,
+            'error_traceback' => $error,
+            'finished_at'     => date('Y-m-d H:i:s'),
+        ]);
 
-            trace("任务 {$taskId} 完成: status={$status}, code={$returnCode}", 'info');
+        trace("[Gateway] 任务完成: task_id={$taskId}, status={$status}", 'info');
+
+        // 查询该任务属于哪个用户，回推结果给 Web 前端
+        $task = \app\model\Task::where('id', $taskId)->find();
+        if ($task) {
+            $node = NodeKey::where('node_key', $nodeKey)->find();
+            if ($node) {
+                self::broadcastToUserWebs($node->user_id, [
+                    'type'       => 'task_result',
+                    'task_id'    => $taskId,
+                    'status'     => $status,
+                    'output'     => $output,
+                    'error'      => $error,
+                    'node_key'   => $nodeKey,
+                    'timestamp'  => time(),
+                ]);
+            }
+        }
+    }
+
+    /**
+     * 处理任务执行进度（节点上报）
+     *
+     * {"type": "task_progress", "task_id": "xxx", "progress": 60, "log": "Step 3/5 done"}
+     */
+    private static function handleTaskProgress(string $clientId, array $data): void
+    {
+        $taskId  = $data['task_id'] ?? '';
+        $nodeKey = Gateway::getUidByClientId($clientId);
+
+        if (empty($taskId)) return;
+
+        $node = NodeKey::where('node_key', $nodeKey)->find();
+        if ($node) {
+            self::broadcastToUserWebs($node->user_id, [
+                'type'      => 'task_progress',
+                'task_id'   => $taskId,
+                'progress'  => $data['progress'] ?? 0,
+                'log'       => $data['log'] ?? '',
+                'node_key'  => $nodeKey,
+                'timestamp' => time(),
+            ]);
         }
     }
 
@@ -195,21 +409,53 @@ class Events
         $taskId = $data['task_id'] ?? '';
         if (empty($taskId)) return;
 
-        $task = TaskModel::where('id', $taskId)->find();
-        if ($task) {
-            $task->save([
-                'status'      => 'killed',
-                'finished_at' => date('Y-m-d H:i:s'),
-            ]);
-            trace("任务 {$taskId} 已被终止", 'info');
-        }
+        \app\model\Task::where('id', $taskId)->update([
+            'status'      => 'killed',
+            'finished_at' => date('Y-m-d H:i:s'),
+        ]);
+
+        trace("[Gateway] 任务已终止: task_id={$taskId}", 'info');
     }
 
     /**
-     * Worker 启动时触发（BusinessWorker）
+     * 处理日志回传
      */
-    public static function onWorkerStart(Worker $worker): void
+    private static function handleLogs(string $clientId, array $data): void
     {
-        trace("BusinessWorker {$worker->id} 启动", 'info');
+        $taskId = $data['task_id'] ?? '';
+        $logs   = $data['logs'] ?? [];
+        if (empty($taskId) || empty($logs)) return;
+
+        $task = \app\model\Task::where('id', $taskId)->find();
+        if ($task) {
+            $existing = $task->error_traceback ?? '';
+            foreach ($logs as $log) {
+                $existing .= "[{$log['level']}] {$log['msg']}" . PHP_EOL;
+            }
+            $task->save(['error_traceback' => $existing]);
+        }
+    }
+
+    // ─────────────────────────────────────────
+    // 工具方法
+    // ─────────────────────────────────────────
+
+    /**
+     * 向某用户的所有 Web 前端广播消息
+     *
+     * Web 前端注册时绑定 UID = "web:{user_id}"
+     * 通过 Gateway::sendToUid 精准投递
+     */
+    private static function broadcastToUserWebs(int $userId, array $payload): void
+    {
+        $uid     = "web:{$userId}";
+        $message = json_encode($payload, JSON_UNESCAPED_UNICODE);
+
+        try {
+            Gateway::sendToUid($uid, $message);
+            trace("[Gateway] 推送给 Web 用户 {$userId}: type={$payload['type']}", 'info');
+        } catch (\Throwable $e) {
+            trace("[Gateway] 推送失败: {$e->getMessage()}", 'error');
+        }
     }
 }

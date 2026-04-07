@@ -163,6 +163,18 @@ export default {
           commit('UPDATE_TASK_STATUS', data.payload)
           break
           
+        case 'task_response':
+          // 处理任务完成响应
+          commit('UPDATE_TASK_STATUS', {
+            taskId: data.request_id || data.task_id,
+            status: data.success ? 'success' : 'failed',
+            deviceUuid: data.device_uuid,
+            progress: 100,
+            response: data.response,
+            error: data.error
+          })
+          break
+          
         case 'task_logs':
           commit('APPEND_TASK_LOGS', {
             taskId: data.taskId,

@@ -1,0 +1,26 @@
+{
+  "id": "script_1775517947246",
+  "type": "script",
+  "payload": {
+    "script_path": "/Users/hc/.openclaw/agents/hc-coding/workspace/admin-pro/backend/storage/openclaw_scripts/test_script.py",
+    "params": {
+      "message": "从 PHP 通过 HTTP 发送到 Bridge"
+    },
+    "working_dir": "/Users/hc/.openclaw/agents/hc-coding/workspace/admin-pro/backend/storage/openclaw_scripts",
+    "timeout": 300
+  },
+  "status": "success",
+  "created_at": 1775517947.246301,
+  "started_at": 1775517947.3545449,
+  "completed_at": 1775517950.597485,
+  "result": {
+    "returncode": 0,
+    "stdout": "=== AdminPro 测试脚本启动 ===\n启动时间: 2026-04-07 07:25:47\nPython 版本: 3.14.3 (main, Feb  3 2026, 15:32:20) [Clang 17.0.0 (clang-1700.6.3.2)]\n开始执行任务...\n处理步骤 1/3...\n处理步骤 2/3...\n处理步骤 3/3...\n=== 执行结果 ===\n{\n  \"status\": \"success\",\n  \"message\": \"测试脚本执行完成\",\n  \"params_received\": {},\n  \"execution_time\": 3,\n  \"timestamp\": \"2026-04-07T07:25:50.496850\"\n}\n=== 脚本执行完成 ===\n",
+    "stderr": "",
+    "pid": 37463
+  },
+  "error": null,
+  "retries": 0,
+  "max_retries": 3,
+  "timeout": 1800
+}

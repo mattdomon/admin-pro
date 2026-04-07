@@ -93,8 +93,76 @@
         </el-card>
       </el-col>
       
-      <!-- 模型管理 -->
+      <!-- 测试脚本 -->
       <el-col :span="12">
+        <el-card>
+          <div slot="header">
+            <span>🧪 测试脚本</span>
+            <el-button style="float: right;" type="text" @click="refreshTestScripts">刷新</el-button>
+          </div>
+          
+          <el-row :gutter="10" style="margin-bottom: 15px;">
+            <el-col :span="18">
+              <el-select v-model="selectedTestScript" placeholder="选择测试脚本" style="width: 100%;">
+                <el-option 
+                  v-for="script in testScripts" 
+                  :key="script.name" 
+                  :label="script.name" 
+                  :value="script.name">
+                  <span style="float: left;">{{ script.name }}</span>
+                  <span style="float: right; color: #8492a6; font-size: 12px;">{{ script.dir }}</span>
+                </el-option>
+              </el-select>
+            </el-col>
+            <el-col :span="6">
+              <el-button 
+                type="primary" 
+                style="width: 100%;" 
+                @click="runTestScriptAction" 
+                :loading="testLoading"
+                :disabled="!selectedTestScript">
+                🚀 运行
+              </el-button>
+            </el-col>
+          </el-row>
+          
+          <el-row :gutter="10">
+            <el-col :span="12">
+              <el-button 
+                type="success" 
+                style="width: 100%;" 
+                @click="quickTest" 
+                :loading="testLoading">
+                ⚡ 快速测试
+              </el-button>
+            </el-col>
+            <el-col :span="12">
+              <el-button 
+                type="warning" 
+                style="width: 100%;" 
+                @click="testOpenClaw" 
+                :loading="testLoading">
+                🤖 测试OpenClaw
+              </el-button>
+            </el-col>
+          </el-row>
+          
+          <div v-if="testResult" style="margin-top: 15px;">
+            <el-alert
+              :title="testResult.message"
+              :type="testResult.success ? 'success' : 'error'"
+              :description="testResult.description"
+              show-icon
+              :closable="false">
+            </el-alert>
+          </div>
+        </el-card>
+      </el-col>
+    </el-row>
+    
+    <!-- 第二行：模型管理 -->
+    <el-row :gutter="20" style="margin-top: 20px;">
+      <el-col :span="24">
         <el-card>
           <div slot="header">
             <span>🤖 模型管理</span>
@@ -177,6 +245,7 @@
 <script>
 import { getStatus, restartService, getLogs, executeCommand } from '@/api/openclaw'
 import { listModels } from '@/api/ai'
+import { runTestScript, getTestScriptList } from '@/api/test'
 
 export default {
   name: 'OpenClawControl',
@@ -203,12 +272,30 @@ export default {
         result: ''
       },
       serviceLoading: false,
-      commandLoading: false
+      commandLoading: false,
+      testLoading: false,
+      testScripts: [],
+      selectedTestScript: '',
+      testResult: null
     }
   },
   mounted() {
     this.fetchSystemStatus()
     this.fetchModels()
+    this.fetchTestScripts()
+    
+    // 初始化 WebSocket 连接
+    this.$store.dispatch('realtime/initWebSocket')
+    
+    // 监听 task_response 消息
+    this.$store.watch(
+      (state) => state.realtime.liveTasks,
+      (newTasks) => {
+        // 处理任务状态变化
+        this.handleTaskStatusChange(newTasks)
+      },
+      { deep: true }
+    )
   },
   methods: {
     async fetchSystemStatus() {
@@ -333,6 +420,170 @@ export default {
         this.$message.error('执行命令失败')
       }
       this.commandLoading = false
+    },
+    
+    // 测试脚本相关方法
+    async fetchTestScripts() {
+      try {
+        const response = await getTestScriptList()
+        this.testScripts = response.data.scripts || []
+      } catch (error) {
+        console.error('获取测试脚本失败:', error)
+        this.$message.error('获取测试脚本失败')
+      }
+    },
+    
+    async refreshTestScripts() {
+      await this.fetchTestScripts()
+      this.$message.success('测试脚本列表已刷新')
+    },
+    
+    async runTestScriptAction() {
+      if (!this.selectedTestScript) {
+        this.$message.warning('请选择要运行的测试脚本')
+        return
+      }
+      
+      this.testLoading = true
+      this.testResult = null
+      
+      try {
+        const response = await runTestScript(this.selectedTestScript)
+        if (response.data && response.data.request_id) {
+          this.testResult = {
+            success: true,
+            message: '测试脚本已启动',
+            description: `脚本 ${this.selectedTestScript} 运行中，请求ID: ${response.data.request_id}`
+          }
+          this.$message.success('测试脚本已启动')
+        } else {
+          throw new Error('无效的响应数据')
+        }
+      } catch (error) {
+        console.error('运行测试脚本失败:', error)
+        this.testResult = {
+          success: false,
+          message: '运行失败',
+          description: error.response?.data?.message || error.message
+        }
+        this.$message.error('运行测试脚本失败')
+      }
+      
+      this.testLoading = false
+    },
+    
+    async quickTest() {
+      this.testLoading = true
+      this.testResult = null
+      
+      try {
+        const response = await axios.post('http://localhost:8000/api/test/quick')
+        if (response.data.code === 200) {
+          this.testResult = {
+            success: true,
+            message: '快速测试已启动',
+            description: response.data.data.tip || '请检查后台日志查看结果'
+          }
+          this.$message.success('快速测试已启动')
+        } else {
+          throw new Error(response.data.message || '快速测试失败')
+        }
+      } catch (error) {
+        console.error('快速测试失败:', error)
+        this.testResult = {
+          success: false,
+          message: '快速测试失败',
+          description: error.response?.data?.message || error.message
+        }
+        this.$message.error('快速测试失败')
+      }
+      
+      this.testLoading = false
+    },
+    
+    async testOpenClaw() {
+      this.testLoading = true
+      this.testResult = null
+      
+      try {
+        const response = await axios.post('http://localhost:8000/api/test/openclaw', {
+          agent_id: 'hc-coding',
+          message: 'AdminPro 控制面板测试消息 - ' + new Date().toLocaleString('zh-CN'),
+          options: { timeout: 30 }
+        })
+        
+        if (response.data.code === 200) {
+          this.testResult = {
+            success: true,
+            message: 'OpenClaw 测试已启动',
+            description: `已向 Agent ${response.data.data.agent_id} 发送测试消息，请求ID: ${response.data.data.request_id}`
+          }
+          this.$message.success('OpenClaw 测试已启动')
+        } else {
+          throw new Error(response.data.message || 'OpenClaw 测试失败')
+        }
+      } catch (error) {
+        console.error('OpenClaw 测试失败:', error)
+        this.testResult = {
+          success: false,
+          message: 'OpenClaw 测试失败',
+          description: error.response?.data?.message || error.message
+        }
+        this.$message.error('OpenClaw 测试失败')
+      }
+      
+      this.testLoading = false
+    },
+    
+    // 处理任务状态变化（WebSocket 监听）
+    handleTaskStatusChange(tasks) {
+      // 仅在测试进行中时处理
+      if (!this.testResult || this.testResult.success === false) return
+      
+      // 查找最近完成的任务
+      const recentCompletedTasks = Object.values(tasks).filter(task => 
+        task.status === 'success' || task.status === 'failed'
+      ).sort((a, b) => b.lastUpdate - a.lastUpdate)
+      
+      if (recentCompletedTasks.length > 0) {
+        const completedTask = recentCompletedTasks[0]
+        // 只处理最近 30 秒内完成的任务
+        if (Date.now() - completedTask.lastUpdate < 30000) {
+          this.showTaskCompletionNotification(completedTask)
+        }
+      }
+    },
+    
+    // 显示任务完成通知
+    showTaskCompletionNotification(task) {
+      const isSuccess = task.status === 'success'
+      const title = isSuccess ? '测试脚本执行成功' : '测试脚本执行失败'
+      const type = isSuccess ? 'success' : 'error'
+      
+      // 更新测试结果显示
+      this.testResult = {
+        success: isSuccess,
+        message: title,
+        description: `任务 ${task.taskId} 已${isSuccess ? '成功完成' : '执行失败'}。请查看日志获取详细信息。`
+      }
+      
+      // 显示通知
+      this.$notify({
+        title,
+        message: `任务 ${task.taskId.substring(0, 8)} 已${isSuccess ? '成功完成' : '执行失败'}`,
+        type,
+        duration: isSuccess ? 4000 : 6000,
+        position: 'bottom-right'
+      })
+      
+      // 如果有日志，显示日志内容
+      const taskLogs = this.$store.state.realtime.taskLogs[task.taskId]
+      if (taskLogs && taskLogs.length > 0) {
+        const lastLog = taskLogs[taskLogs.length - 1]
+        console.log('Task completed with logs:', lastLog)
+        
+        // 可以根据需要在这里处理日志显示
+      }
     }
   }
 }

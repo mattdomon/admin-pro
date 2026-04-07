@@ -95,6 +95,18 @@
             </el-menu-item>
           </el-submenu>
           
+          <!-- Bridge 测试 -->
+          <el-submenu index="/bridge">
+            <template slot="title">
+              <i class="el-icon-connection"></i>
+              <span>Bridge 测试</span>
+            </template>
+            <el-menu-item index="/bridge/test">
+              <i class="el-icon-cpu"></i>
+              <span slot="title">测试面板</span>
+            </el-menu-item>
+          </el-submenu>
+          
           <!-- 系统管理 -->
           <el-submenu index="/system">
             <template slot="title">

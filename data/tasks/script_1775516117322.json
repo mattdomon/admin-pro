@@ -1,0 +1,22 @@
+{
+  "id": "script_1775516117322",
+  "type": "script",
+  "payload": {
+    "script_path": "/Users/hc/.openclaw/agents/hc-coding/workspace/admin-pro/test_script.py",
+    "args": []
+  },
+  "status": "success",
+  "created_at": 1775516117.322318,
+  "started_at": 1775516117.854136,
+  "completed_at": 1775516118.975401,
+  "result": {
+    "returncode": 0,
+    "stdout": "Hello from test script!\n任务执行成功\n脚本执行完成\n",
+    "stderr": "",
+    "pid": 32169
+  },
+  "error": null,
+  "retries": 0,
+  "max_retries": 3,
+  "timeout": 1800
+}

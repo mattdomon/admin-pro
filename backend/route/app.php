@@ -34,6 +34,14 @@ Route::group('api/openclaw', function () {
     Route::get('sessions/list', 'openclaw.Sessions/list');
     Route::get('sessions/detail', 'openclaw.Sessions/detail');
     Route::post('sessions/cleanup', 'openclaw.Sessions/cleanup');
+    
+    // Bridge 任务管理 - 新增
+    Route::post('bridge/task', 'BridgeCtrl/submitTask');          // 提交任务
+    Route::get('bridge/tasks', 'BridgeCtrl/getTasks');            // 任务列表
+    Route::get('bridge/task/:task_id', 'BridgeCtrl/getTask');     // 任务详情
+    Route::delete('bridge/tasks/completed', 'BridgeCtrl/clearCompletedTasks'); // 清理完成任务
+    Route::put('bridge/task/:task_id/cancel', 'BridgeCtrl/cancelTask');        // 取消任务
+    Route::get('bridge/status', 'BridgeCtrl/getBridgeStatus');    // Bridge 状态
 });
 
 // OpenClaw 模型配置管理 - 直接读写 openclaw.json
@@ -48,8 +56,18 @@ Route::group('api/openclaw/config', function () {
     Route::post('models/remove-fallback', 'app\controller\openclaw\OpenClawConfig@removeFallback');
 });
 
-// 测试接口
-Route::get('api/test', function () {
+// Bridge WebSocket 测试接口
+Route::group('api/test', function () {
+    Route::post('run-script', 'TestCtrl/runScript');              // 运行测试脚本
+    Route::post('openclaw', 'TestCtrl/testOpenClaw');             // 测试 OpenClaw 调用
+    Route::post('ai', 'TestCtrl/testAi');                        // 测试 AI 调用
+    Route::get('status', 'TestCtrl/status');                     // WebSocket 连接状态
+    Route::get('scripts', 'TestCtrl/listScripts');               // 可用脚本列表
+    Route::post('quick', 'TestCtrl/quickTest');                  // 快速测试
+});
+
+// 简单的 API 状态检查
+Route::get('api/test-simple', function () {
     return json(['code' => 200, 'message' => 'API正常', 'time' => date('Y-m-d H:i:s')]);
 });
 

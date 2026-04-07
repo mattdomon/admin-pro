@@ -1,0 +1,33 @@
+{
+  "id": "webhook_1775516153788",
+  "type": "webhook",
+  "payload": {
+    "url": "https://httpbin.org/post",
+    "method": "POST",
+    "data": {
+      "message": "Bridge测试",
+      "timestamp": "2026-04-07"
+    }
+  },
+  "status": "success",
+  "created_at": 1775516153.788447,
+  "started_at": 1775516153.8925881,
+  "completed_at": 1775516154.9741728,
+  "result": {
+    "status": 200,
+    "response": "{\n  \"args\": {}, \n  \"data\": \"{\\\"message\\\": \\\"Bridge\\\\u6d4b\\\\u8bd5\\\", \\\"timestamp\\\": \\\"2026-04-07\\\"}\", \n  \"files\": {}, \n  \"form\": {}, \n  \"headers\": {\n    \"Accept\": \"*/*\", \n    \"Accept-Encoding\": \"gzip, deflate\", \n    \"Content-Length\": \"60\", \n    \"Content-Type\": \"application/json\", \n    \"Host\": \"httpbin.org\", \n    \"User-Agent\": \"Python/3.9 aiohttp/3.13.5\", \n    \"X-Amzn-Trace-Id\": \"Root=1-69d439fa-35d680a85f7d30a038ec3707\"\n  }, \n  \"json\": {\n    \"message\": \"Bridge\\u6d4b\\u8bd5\", \n    \"timestamp\": \"2026-04-07\"\n  }, \n  \"origin\": \"188.253.7.69\", \n  \"url\": \"https://httpbin.org/post\"\n}\n",
+    "headers": {
+      "Date": "Mon, 06 Apr 2026 22:55:54 GMT",
+      "Content-Type": "application/json",
+      "Content-Length": "582",
+      "Connection": "keep-alive",
+      "Server": "gunicorn/19.9.0",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Credentials": "true"
+    }
+  },
+  "error": null,
+  "retries": 0,
+  "max_retries": 3,
+  "timeout": 60
+}

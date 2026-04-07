@@ -1,0 +1,24 @@
+{
+  "id": "ai_1775516137914",
+  "type": "ai",
+  "payload": {
+    "model": "claude-3-5-haiku-latest",
+    "prompt": "解释一下Bridge服务的作用",
+    "context": "这是一个测试AI任务"
+  },
+  "status": "success",
+  "created_at": 1775516137.9141939,
+  "started_at": 1775516138.877714,
+  "completed_at": 1775516138.877725,
+  "result": {
+    "model": "claude-3-5-haiku-latest",
+    "response": "AI处理结果示例",
+    "usage": {
+      "tokens": 100
+    }
+  },
+  "error": null,
+  "retries": 0,
+  "max_retries": 3,
+  "timeout": 300
+}

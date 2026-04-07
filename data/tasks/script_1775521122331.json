@@ -1,0 +1,17 @@
+{
+  "id": "script_1775521122331",
+  "type": "script",
+  "payload": {
+    "script_path": "/Users/hc/.openclaw/agents/hc-coding/workspace/admin-pro/backend/storage/openclaw_scripts/test_script.py",
+    "params": []
+  },
+  "status": "pending",
+  "created_at": 1775521122.3319879,
+  "started_at": null,
+  "completed_at": null,
+  "result": null,
+  "error": null,
+  "retries": 0,
+  "max_retries": 3,
+  "timeout": 1800
+}

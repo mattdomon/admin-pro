@@ -229,6 +229,9 @@ class BridgeService:
         task.status = TaskStatus.RUNNING
         task.started_at = time.time()
         
+        # 发送任务开始通知
+        await self._notify_task_status_change(task, "started")
+        
         try:
             # 根据任务类型分发到对应处理器
             if task.type == "openclaw":
@@ -248,10 +251,17 @@ class BridgeService:
             
             logger.info(f"任务完成: {task.id}")
             
+            # 发送成功通知
+            await self._notify_task_status_change(task, "success")
+            
         except asyncio.TimeoutError:
             task.status = TaskStatus.TIMEOUT
             task.error = "任务执行超时"
+            task.completed_at = time.time()
             logger.warning(f"任务超时: {task.id}")
+            
+            # 发送超时通知
+            await self._notify_task_status_change(task, "timeout")
             
         except Exception as e:
             task.error = str(e)
@@ -265,6 +275,9 @@ class BridgeService:
                 task.status = TaskStatus.FAILED
                 task.completed_at = time.time()
                 logger.error(f"任务失败: {task.id} - {e}")
+                
+                # 发送失败通知（包含详细错误信息）
+                await self._notify_task_status_change(task, "failed")
         
         finally:
             await self._save_task(task)
@@ -693,6 +706,57 @@ class BridgeService:
         except Exception as e:
             logger.error(f"发送 WebSocket 消息失败: {e}")
             return False
+
+    async def _notify_task_status_change(self, task: Task, event_type: str):
+        """通知任务状态变化"""
+        try:
+            # 构造通知消息
+            notification = {
+                "type": "task_notification",
+                "event_type": event_type,  # started, success, failed, timeout
+                "task_id": task.id,
+                "task_type": task.type,
+                "status": task.status.value,
+                "timestamp": time.time(),
+                "node_id": self.node_id
+            }
+            
+            # 添加不同事件类型的特定信息
+            if event_type == "started":
+                notification["message"] = f"任务开始执行: {task.id[:8]}..."
+                notification["script_name"] = task.payload.get('script_path', '')
+                
+            elif event_type == "success":
+                notification["message"] = f"任务执行成功: {task.id[:8]}..."
+                notification["result"] = task.result
+                notification["execution_time"] = task.completed_at - task.started_at if task.started_at else 0
+                
+            elif event_type == "failed":
+                notification["message"] = f"任务执行失败: {task.id[:8]}..."
+                notification["error"] = task.error
+                notification["error_detail"] = {
+                    "task_id": task.id,
+                    "task_type": task.type,
+                    "script_path": task.payload.get('script_path', ''),
+                    "error_message": task.error,
+                    "retries": task.retries,
+                    "max_retries": task.max_retries
+                }
+                
+            elif event_type == "timeout":
+                notification["message"] = f"任务执行超时: {task.id[:8]}..."
+                notification["timeout_duration"] = task.timeout
+            
+            # 发送通知
+            success = await self.send_websocket_message(notification)
+            
+            if success:
+                logger.info(f"✅ 任务通知已发送: {event_type} - {task.id[:8]}...")
+            else:
+                logger.warning(f"⚠️ 任务通知发送失败: {event_type} - {task.id[:8]}...")
+                
+        except Exception as e:
+            logger.error(f"发送任务通知失败: {e}")
 
     def get_stats(self) -> Dict[str, Any]:
         """获取服务统计信息"""

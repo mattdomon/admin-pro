@@ -1,7 +1,7 @@
 <template>
   <div class="dashboard">
     <h2 style="margin-bottom: 20px;">📊 Admin Pro - 多节点管理系统</h2>
-    
+
     <!-- 系统概览卡片 -->
     <el-row :gutter="20" class="overview-cards">
       <el-col :span="6">
@@ -16,7 +16,7 @@
           </div>
         </el-card>
       </el-col>
-      
+
       <el-col :span="6">
         <el-card class="stat-card" shadow="hover" @click.native="$router.push('/task')">
           <div class="stat-icon" style="background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);">
@@ -29,7 +29,7 @@
           </div>
         </el-card>
       </el-col>
-      
+
       <el-col :span="6">
         <el-card class="stat-card" shadow="hover" @click.native="$router.push('/realtime')">
           <div class="stat-icon" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
@@ -42,7 +42,7 @@
           </div>
         </el-card>
       </el-col>
-      
+
       <el-col :span="6">
         <el-card class="stat-card" shadow="hover">
           <div class="stat-icon" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
@@ -56,7 +56,7 @@
         </el-card>
       </el-col>
     </el-row>
-    
+
     <!-- 项目信息与系统状态 -->
     <el-row :gutter="20" style="margin-top: 20px;">
       <el-col :span="12">
@@ -83,7 +83,7 @@
           </el-descriptions>
         </el-card>
       </el-col>
-      
+
       <!-- 功能模块状态 -->
       <el-col :span="12">
         <el-card>
@@ -115,7 +115,45 @@
         </el-card>
       </el-col>
     </el-row>
-    
+
+    <!-- 🚀 架构测试区域 -->
+    <el-card shadow="never" style="margin: 20px 0; border: 2px dashed #409EFF;">
+      <div slot="header" style="background: linear-gradient(90deg, #409EFF, #67C23A); color: white; margin: -20px; padding: 15px; border-radius: 4px 4px 0 0;">
+        <i class="el-icon-cpu"></i>
+        <strong>🚀 全链路架构测试</strong>
+        <span style="font-size: 12px; opacity: 0.8; margin-left: 10px;">
+          Vue → PHP → WebSocket → Python Bridge
+        </span>
+      </div>
+      
+      <div style="padding: 20px; text-align: center;">
+        <el-button 
+          type="primary" 
+          size="large"
+          icon="el-icon-lightning"
+          :loading="testRunning"
+          @click="runArchitectureTest"
+          style="font-size: 16px; padding: 15px 30px;"
+        >
+          {{ testRunning ? '执行中...' : '[架构测试] 运行远程脚本' }}
+        </el-button>
+        
+        <div v-if="testResult" style="margin-top: 20px; padding: 15px; border-radius: 4px;" :class="testResult.success ? 'test-success' : 'test-error'">
+          <div style="font-weight: bold; margin-bottom: 10px;">
+            {{ testResult.success ? '✅ 测试成功' : '❌ 测试失败' }}
+          </div>
+          <div style="font-size: 14px; white-space: pre-wrap;">{{ testResult.message }}</div>
+          <div v-if="testResult.output" style="background: #f5f5f5; padding: 10px; border-radius: 4px; margin-top: 10px; font-family: monospace; font-size: 12px; text-align: left;">
+            {{ testResult.output }}
+          </div>
+        </div>
+        
+        <div style="font-size: 12px; color: #909399; margin-top: 10px;">
+          此测试将验证前端、PHP后端、WebSocket网关、Python Bridge 四层架构的完整连通性
+        </div>
+      </div>
+    </el-card>
+
     <!-- 快速操作 -->
     <el-card style="margin-top: 20px;">
       <div slot="header">
@@ -154,7 +192,7 @@
         </el-col>
       </el-row>
     </el-card>
-    
+
     <!-- 最近活动 -->
     <el-card style="margin-top: 20px;">
       <div slot="header">
@@ -218,7 +256,11 @@ export default {
           description: 'Admin Pro 多节点管理系统启动成功',
           node: 'System'
         }
-      ]
+      ],
+      
+      // 🚀 架构测试状态
+      testRunning: false,
+      testResult: null
     }
   },
   mounted() {
@@ -237,7 +279,7 @@ export default {
       await this.fetchOpenClawStatus()
       this.checkWebSocket()
     },
-    
+
     async fetchOpenClawStatus() {
       try {
         const res = await getStatus()
@@ -259,7 +301,7 @@ export default {
         this.$message.error('获取系统状态失败')
       }
     },
-    
+
     async fetchDevices() {
       try {
         const res = await getDeviceList()
@@ -273,7 +315,7 @@ export default {
         console.log('获取设备信息失败:', e)
       }
     },
-    
+
     async fetchTasks() {
       try {
         const res = await listTasks()
@@ -288,7 +330,7 @@ export default {
         console.log('获取任务信息失败:', e)
       }
     },
-    
+
     checkWebSocket() {
       // 检查 WebSocket 连接状态
       try {
@@ -304,7 +346,7 @@ export default {
         this.wsConnections = 0
       }
     },
-    
+
     startTimer() {
       // 更新运行时间
       const startTime = new Date()
@@ -317,10 +359,64 @@ export default {
         this.systemStatus.uptime = `${days}天${hours}小时${minutes}分`
       }, 60000)
     },
-    
+
     refreshData() {
       this.fetchData()
       this.$message.success('数据已刷新')
+    },
+    
+    // 🚀 架构测试方法
+    async runArchitectureTest() {
+      this.testRunning = true
+      this.testResult = null
+      
+      try {
+        this.$message({
+          message: '🚀 正在启动全链路架构测试...',
+          type: 'info',
+          duration: 2000
+        })
+        
+        // 调用 PHP 后端的测试脚本接口
+        const response = await this.$http.post('/api/test/run-script', {
+          script_name: 'test_script.py',
+          test_mode: true,
+          source: 'architecture_test'
+        })
+        
+        if (response.data.code === 200) {
+          this.testResult = {
+            success: true,
+            message: '✅ 全链路架构测试成功！\n\n• Vue 前端: 成功发起请求\n• PHP 后端: 成功接收并处理\n• WebSocket: 成功传输任务\n• Python Bridge: 成功执行脚本',
+            output: response.data.data.output || response.data.message
+          }
+          
+          this.$notify({
+            title: '架构测试成功！',
+            message: '四层架构已完全连通，系统运行正常',
+            type: 'success',
+            duration: 5000
+          })
+        } else {
+          throw new Error(response.data.message || '测试失败')
+        }
+        
+      } catch (error) {
+        console.error('架构测试失败:', error)
+        this.testResult = {
+          success: false,
+          message: `❌ 架构测试失败\n\n错误信息: ${error.message || error}`,
+          output: error.response?.data?.data?.error || ''
+        }
+        
+        this.$notify.error({
+          title: '架构测试失败',
+          message: '请检查系统日志排查问题',
+          duration: 5000
+        })
+      } finally {
+        this.testRunning = false
+      }
     }
   }
 }
@@ -377,5 +473,18 @@ export default {
 .stat-sublabel {
   font-size: 12px;
   color: #909399;
+}
+
+/* 🚀 架构测试样式 */
+.test-success {
+  background: linear-gradient(135deg, #f0f9ff 0%, #e0f7fa 100%);
+  border: 1px solid #4fc3f7;
+  color: #01579b;
+}
+
+.test-error {
+  background: linear-gradient(135deg, #fef5e7 0%, #ffebee 100%);
+  border: 1px solid #ff7043;
+  color: #d84315;
 }
 </style>

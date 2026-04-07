@@ -1,0 +1,21 @@
+{
+  "id": "openclaw_1775516172615",
+  "type": "openclaw",
+  "payload": {
+    "action": "get_status"
+  },
+  "status": "success",
+  "created_at": 1775516172.61583,
+  "started_at": 1775516172.913728,
+  "completed_at": 1775516172.9139252,
+  "result": {
+    "status": "connected",
+    "ws_connected": true,
+    "node_id": "bridge_client_1775516086",
+    "reconnect_attempts": 0
+  },
+  "error": null,
+  "retries": 0,
+  "max_retries": 3,
+  "timeout": 600
+}

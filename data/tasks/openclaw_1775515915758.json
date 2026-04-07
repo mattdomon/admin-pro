@@ -1,0 +1,16 @@
+{
+  "id": "openclaw_1775515915758",
+  "type": "openclaw",
+  "payload": {
+    "action": "get_status"
+  },
+  "status": "pending",
+  "created_at": 1775515915.7587671,
+  "started_at": null,
+  "completed_at": null,
+  "result": null,
+  "error": null,
+  "retries": 0,
+  "max_retries": 3,
+  "timeout": 600
+}

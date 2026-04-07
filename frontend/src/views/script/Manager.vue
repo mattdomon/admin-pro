@@ -68,6 +68,14 @@
                 @click="saveScript"
               >保存</el-button>
               <el-button
+                v-if="!isNew"
+                type="primary"
+                size="small"
+                icon="el-icon-video-play"
+                :loading="executing"
+                @click="executeScript"
+              >执行脚本</el-button>
+              <el-button
                 size="small"
                 icon="el-icon-close"
                 @click="closeEditor"
@@ -112,6 +120,111 @@
       </el-col>
     </el-row>
 
+    <!-- 近期任务列表 -->
+    <el-card shadow="never" style="margin-top: 16px;">
+      <div slot="header" class="task-header">
+        <span>📈 近期任务列表</span>
+        <div class="task-actions">
+          <el-button
+            size="small"
+            icon="el-icon-refresh"
+            :loading="tasksLoading"
+            @click="loadTasks"
+          >刷新任务</el-button>
+          <el-button
+            size="small"
+            icon="el-icon-delete"
+            @click="clearCompletedTasks"
+          >清理完成任务</el-button>
+        </div>
+      </div>
+
+      <div v-if="tasksLoading" class="loading-state">
+        <i class="el-icon-loading"></i> 加载任务列表...
+      </div>
+
+      <div v-else-if="tasks.length === 0" class="empty-state">
+        <i class="el-icon-document-copy"></i>
+        <p>暂无执行任务</p>
+      </div>
+
+      <el-table v-else :data="tasks" stripe size="small">
+        <el-table-column prop="task_id" label="任务ID" width="200">
+          <template slot-scope="scope">
+            <el-tag size="mini" type="info">{{ scope.row.task_id.substr(-8) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="script_name" label="脚本" width="150" />
+        <el-table-column prop="status" label="状态" width="100">
+          <template slot-scope="scope">
+            <el-tag
+              size="mini"
+              :type="getTaskStatusType(scope.row.status)"
+            >
+              {{ getTaskStatusText(scope.row.status) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="created_at" label="创建时间" width="160">
+          <template slot-scope="scope">
+            {{ formatTime(scope.row.created_at) }}</template>
+        </el-table-column>
+        <el-table-column prop="completed_at" label="完成时间" width="160">
+          <template slot-scope="scope">
+            {{ scope.row.completed_at ? formatTime(scope.row.completed_at) : '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="结果" min-width="200">
+          <template slot-scope="scope">
+            <div v-if="scope.row.status === 'success'" class="task-result success">
+              <i class="el-icon-success"></i>
+              <span>执行成功</span>
+              <el-button
+                v-if="scope.row.result"
+                type="text"
+                size="mini"
+                @click="showTaskResult(scope.row)"
+              >查看结果</el-button>
+            </div>
+            <div v-else-if="scope.row.status === 'failed'" class="task-result error">
+              <i class="el-icon-error"></i>
+              <span>执行失败</span>
+              <el-button
+                v-if="scope.row.error"
+                type="text"
+                size="mini"
+                @click="showTaskError(scope.row)"
+              >查看错误</el-button>
+            </div>
+            <div v-else-if="scope.row.status === 'running'" class="task-result running">
+              <i class="el-icon-loading"></i>
+              <span>执行中...</span>
+            </div>
+            <div v-else-if="scope.row.status === 'pending'" class="task-result pending">
+              <i class="el-icon-time"></i>
+              <span>等待执行</span>
+            </div>
+            <div v-else class="task-result">
+              <span>{{ scope.row.status }}</span>
+            </div>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <!-- 分页 -->
+      <el-pagination
+        v-if="tasks.length > 0"
+        style="margin-top: 16px; text-align: center;"
+        :current-page="taskPage"
+        :page-size="taskPageSize"
+        :total="taskTotal"
+        layout="prev, pager, next, sizes, total"
+        :page-sizes="[10, 20, 50]"
+        @size-change="handleTaskSizeChange"
+        @current-change="handleTaskCurrentChange"
+      />
+    </el-card>
+
     <!-- 模板选择对话框 -->
     <el-dialog title="从模板创建脚本" :visible.sync="templateDialogVisible" width="600px">
       <div v-if="templatesLoading" style="text-align: center; padding: 40px">
@@ -153,6 +266,7 @@ export default {
       scripts: [],
       loading: false,
       saving: false,
+      executing: false,
 
       // 当前编辑
       currentScript: null,  // null = 没有打开任何脚本
@@ -169,6 +283,14 @@ export default {
       templatesLoading: false,
       templates: [],
       selectedTemplate: null,
+
+      // 任务管理
+      tasks: [],
+      tasksLoading: false,
+      taskPage: 1,
+      taskPageSize: 10,
+      taskTotal: 0,
+      taskTimer: null, // 定时刷新定时器
     }
   },
 
@@ -183,6 +305,25 @@ export default {
 
   mounted() {
     this.loadScripts()
+    this.loadTasks() // 加载任务列表
+    
+    // 启动定时刷新（每30秒刷新一次）
+    this.taskTimer = setInterval(() => {
+      this.loadTasks()
+    }, 30000)
+    
+    // 连接 WebSocket 任务通知
+    this.initTaskNotifier()
+  },
+
+  beforeDestroy() {
+    // 清理定时器
+    if (this.taskTimer) {
+      clearInterval(this.taskTimer)
+    }
+    
+    // 断开 WebSocket 连接
+    this.$disconnectTaskNotifier()
   },
 
   methods: {
@@ -298,6 +439,299 @@ export default {
       this.editingContent = tpl.content
       this.syntaxError = null
       this.templateDialogVisible = false
+    },
+
+    // ===================
+    // 任务管理相关方法
+    // ===================
+
+    async executeScript() {
+      if (!this.editingName.endsWith('.py')) {
+        this.$message.error('必须先保存为 .py 文件')
+        return
+      }
+
+      this.executing = true
+      try {
+        const res = await this.$axios.post('/api/openclaw/bridge/task', {
+          type: 'script',
+          payload: {
+            script_path: this.editingName,
+            args: []
+          }
+        })
+
+        if (res.data.code === 200) {
+          this.$message.success(`脚本已下发执行，任务ID: ${res.data.task_id}`)
+          // 立即刷新任务列表
+          this.loadTasks()
+        } else {
+          this.$message.error(res.data.message || '执行失败')
+        }
+      } catch (e) {
+        this.$message.error('执行脚本失败: ' + (e.response?.data?.message || e.message))
+      } finally {
+        this.executing = false
+      }
+    },
+
+    async loadTasks() {
+      this.tasksLoading = true
+      try {
+        const res = await this.$axios.get('/api/openclaw/bridge/tasks', {
+          params: {
+            page: this.taskPage,
+            size: this.taskPageSize
+          }
+        })
+
+        if (res.data.code === 200) {
+          this.tasks = res.data.data.tasks || []
+          this.taskTotal = res.data.data.total || 0
+        }
+      } catch (e) {
+        // 静默失败，不显示错误信息（避免频繁弹窗）
+        this.$logDebug('script-manager', '加载任务列表失败', e)
+      } finally {
+        this.tasksLoading = false
+      }
+    },
+
+    async clearCompletedTasks() {
+      try {
+        await this.$confirm('是否清理所有已完成的任务？', '提示', {
+          confirmButtonText: '清理',
+          cancelButtonText: '取消',
+          type: 'warning'
+        })
+
+        const res = await this.$axios.delete('/api/openclaw/bridge/tasks/completed')
+        if (res.data.code === 200) {
+          this.$message.success('清理成功')
+          this.loadTasks()
+        }
+      } catch (e) {
+        if (e !== 'cancel') {
+          this.$message.error('清理失败')
+        }
+      }
+    },
+
+    showTaskResult(task) {
+      this.$msgbox({
+        title: `任务结果 - ${task.task_id.substr(-8)}`,
+        message: this.$createElement('pre', {
+          style: {
+            'max-height': '400px',
+            'overflow-y': 'auto',
+            'white-space': 'pre-wrap',
+            'font-family': 'monospace',
+            'font-size': '12px',
+            'background': '#f5f5f5',
+            'padding': '12px',
+            'border-radius': '4px'
+          }
+        }, JSON.stringify(task.result, null, 2)),
+        showCancelButton: false,
+        confirmButtonText: '关闭',
+        customClass: 'task-result-dialog'
+      })
+    },
+
+    showTaskError(task) {
+      this.$msgbox({
+        title: `任务错误 - ${task.task_id.substr(-8)}`,
+        message: this.$createElement('pre', {
+          style: {
+            'max-height': '400px',
+            'overflow-y': 'auto',
+            'white-space': 'pre-wrap',
+            'font-family': 'monospace',
+            'font-size': '12px',
+            'background': '#fef0f0',
+            'color': '#f56c6c',
+            'padding': '12px',
+            'border-radius': '4px'
+          }
+        }, task.error),
+        showCancelButton: false,
+        confirmButtonText: '关闭',
+        customClass: 'task-error-dialog'
+      })
+    },
+
+    getTaskStatusType(status) {
+      const statusMap = {
+        pending: '',
+        running: 'warning',
+        success: 'success',
+        failed: 'danger',
+        timeout: 'danger',
+        cancelled: 'info'
+      }
+      return statusMap[status] || 'info'
+    },
+
+    getTaskStatusText(status) {
+      const statusMap = {
+        pending: '等待中',
+        running: '执行中',
+        success: '成功',
+        failed: '失败',
+        timeout: '超时',
+        cancelled: '取消'
+      }
+      return statusMap[status] || status
+    },
+
+    formatTime(timestamp) {
+      if (!timestamp) return '-'
+      const date = new Date(timestamp * 1000)
+      return date.toLocaleString('zh-CN', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      })
+    },
+
+    handleTaskSizeChange(size) {
+      this.taskPageSize = size
+      this.taskPage = 1
+      this.loadTasks()
+    },
+
+    handleTaskCurrentChange(page) {
+      this.taskPage = page
+      this.loadTasks()
+    },
+
+    // ===================
+    // WebSocket 通知相关方法
+    // ===================
+
+    initTaskNotifier() {
+      try {
+        // 连接 WebSocket
+        this.$connectTaskNotifier('ws://localhost:8282')
+        
+        // 监听任务错误事件
+        this.$taskNotifier.on('task_error', this.handleTaskError)
+        
+        // 监听任务成功事件
+        this.$taskNotifier.on('task_success', this.handleTaskSuccess)
+        
+        // 监听任务开始事件
+        this.$taskNotifier.on('task_started', this.handleTaskStarted)
+        
+        // 监听连接状态
+        this.$taskNotifier.on('connected', () => {
+          this.$logInfo('script-manager', '🟢 任务通知服务已连接')
+        })
+        
+        this.$taskNotifier.on('disconnected', () => {
+          this.$logInfo('script-manager', '🔴 任务通知服务已断开')
+        })
+        
+      } catch (e) {
+        this.$logError('script-manager', '初始化任务通知失败', e)
+      }
+    },
+
+    handleTaskError(data) {
+      const { taskId, error, scriptPath } = data
+      
+      this.$logError('script-manager', '❗️ 任务执行失败', data)
+      
+      // 显示错误通知
+      this.$notify.error({
+        title: '脚本执行失败',
+        message: `脚本 ${scriptPath} 执行失败：${error}`,
+        duration: 8000,
+        showClose: true,
+        onClick: () => {
+          // 点击通知显示详细错误
+          this.showErrorDetails(data)
+        }
+      })
+      
+      // 立即刷新任务列表
+      this.loadTasks()
+    },
+
+    handleTaskSuccess(data) {
+      const { task_id, message, result } = data
+      
+      this.$logInfo('script-manager', '✅ 任务执行成功', data)
+      
+      // 显示成功通知
+      this.$notify.success({
+        title: '脚本执行成功',
+        message: message || `任务 ${task_id.substr(-8)} 执行成功`,
+        duration: 4000,
+        showClose: true
+      })
+      
+      // 刷新任务列表
+      this.loadTasks()
+    },
+
+    handleTaskStarted(data) {
+      const { task_id, message, script_name } = data
+      
+      this.$logInfo('script-manager', '▶️ 任务开始执行', data)
+      
+      // 显示开始通知
+      this.$notify.info({
+        title: '脚本开始执行',
+        message: message || `脚本 ${script_name} 开始执行...`,
+        duration: 3000
+      })
+      
+      // 刷新任务列表
+      this.loadTasks()
+    },
+
+    showErrorDetails(errorData) {
+      const { detail } = errorData
+      
+      this.$msgbox({
+        title: '脚本执行错误详情',
+        message: this.$createElement('div', {
+          style: { 'font-family': 'monospace', 'white-space': 'pre-wrap' }
+        }, [
+          this.$createElement('h4', '错误信息:'),
+          this.$createElement('div', {
+            style: {
+              'background': '#fef0f0',
+              'color': '#f56c6c',
+              'padding': '12px',
+              'border-radius': '4px',
+              'margin': '8px 0'
+            }
+          }, detail.error_message),
+          
+          this.$createElement('h4', '任务信息:'),
+          this.$createElement('div', {
+            style: {
+              'background': '#f5f5f5',
+              'padding': '12px',
+              'border-radius': '4px',
+              'font-size': '12px'
+            }
+          }, [
+            `任务ID: ${detail.task_id}`,
+            `\n脚本路径: ${detail.script_path}`,
+            `\n任务类型: ${detail.task_type}`,
+            `\n重试次数: ${detail.retries}/${detail.max_retries}`
+          ].join(''))
+        ]),
+        showCancelButton: false,
+        confirmButtonText: '关闭',
+        customClass: 'error-detail-dialog'
+      })
     }
   },
 
@@ -405,4 +839,43 @@ export default {
 }
 .template-item:hover { border-color: #409EFF; background: #ecf5ff; }
 .tpl-desc { display: block; font-size: 12px; color: #909399; margin-top: 4px; }
+
+/* 任务列表样式 */
+.task-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.task-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.task-result {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.task-result.success {
+  color: #67c23a;
+}
+
+.task-result.error {
+  color: #f56c6c;
+}
+
+.task-result.running {
+  color: #e6a23c;
+}
+
+.task-result.pending {
+  color: #909399;
+}
+
+.task-result i {
+  font-size: 14px;
+}
 </style>

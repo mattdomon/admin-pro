@@ -35,6 +35,9 @@ const routes = [
       // Agent 管理
       { path: '/agents', name: 'AgentManager', component: () => import('@/views/agent/Manager.vue') },
 
+      // Bridge WebSocket 测试
+      { path: '/bridge/test', name: 'BridgeTestPanel', component: () => import('@/views/bridge/TestPanel.vue') },
+
       // 系统管理
       { path: '/device', name: 'DeviceIndex', component: () => import('@/views/device/Index.vue') },
       { path: '/monitor', name: 'SystemMonitor', component: () => import('@/views/monitor/SystemMonitor.vue') }

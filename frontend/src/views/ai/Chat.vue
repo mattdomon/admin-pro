@@ -1,8 +1,36 @@
 <template>
   <div class="ai-chat">
     <el-container style="height: 100%;">
-      <!-- 左侧模型选择 -->
-      <el-aside width="250px" style="background: #f5f5f5; padding: 15px;">
+      <!-- 左侧节点+模型选择 -->
+      <el-aside width="250px" style="background: #f5f5f5; padding: 15px; overflow-y: auto;">
+
+        <!-- 节点选择 -->
+        <h4 style="margin-top: 0;">执行节点</h4>
+        <el-select
+          v-model="selectedNodeId"
+          placeholder="本地执行（默认）"
+          size="small"
+          style="width: 100%; margin-bottom: 6px;"
+          clearable
+          @change="handleNodeChange">
+          <el-option
+            v-for="node in onlineNodes"
+            :key="node.id"
+            :label="node.node_name"
+            :value="node.id">
+            <span style="float:left">{{ node.node_name }}</span>
+            <el-tag type="success" size="mini" style="float:right; margin-top:8px;">在线</el-tag>
+          </el-option>
+        </el-select>
+        <div v-if="selectedNodeInfo" style="font-size:12px; color:#67C23A; margin-bottom:12px;">
+          <i class="el-icon-connection"></i> {{ selectedNodeInfo.node_name }}
+        </div>
+        <div v-else style="font-size:12px; color:#909399; margin-bottom:12px;">
+          <i class="el-icon-monitor"></i> 本地执行
+        </div>
+
+        <el-divider style="margin: 10px 0;"></el-divider>
+
         <h4 style="margin-top: 0;">AI模型</h4>
         <el-radio-group v-model="selectedModelId" style="width: 100%;" @change="handleModelChange">
           <div v-if="defaultModel" class="model-item">
@@ -33,6 +61,13 @@
           @click="$router.push('/ai/models')">
           <i class="el-icon-setting"></i> 管理模型
         </el-button>
+
+        <!-- 当前会话信息 -->
+        <el-divider style="margin: 10px 0;"></el-divider>
+        <div style="font-size:12px; color:#909399;">
+          <div><i class="el-icon-cpu"></i> 模型: {{ selectedModelLabel }}</div>
+          <div style="margin-top:4px;"><i class="el-icon-connection"></i> 节点: {{ selectedNodeInfo ? selectedNodeInfo.node_name : '本地' }}</div>
+        </div>
       </el-aside>
       
       <!-- 右侧聊天区域 -->
@@ -72,6 +107,25 @@
         
         <!-- 输入区域 -->
         <div class="chat-input-area">
+          <!-- 顶部选择栏（快捷切换） -->
+          <div class="chat-quick-bar">
+            <el-select v-model="selectedNodeId" placeholder="本地执行" size="mini" style="width:140px;" clearable>
+              <el-option
+                v-for="node in onlineNodes"
+                :key="node.id"
+                :label="node.node_name"
+                :value="node.id">
+              </el-option>
+            </el-select>
+            <el-select v-model="selectedModelId" placeholder="选择模型" size="mini" style="width:160px; margin-left:8px;">
+              <el-option
+                v-for="m in models"
+                :key="m.id"
+                :label="m.name"
+                :value="m.id">
+              </el-option>
+            </el-select>
+          </div>
           <div class="chat-input-wrapper">
             <el-input
               v-model="inputText"
@@ -102,6 +156,7 @@
 
 <script>
 import { listModels, chatStream } from '@/api/ai'
+import { getNodeList } from '@/api/nodes'
 
 export default {
   name: 'AIChat',
@@ -109,6 +164,8 @@ export default {
     return {
       models: [],
       selectedModelId: null,
+      nodes: [],
+      selectedNodeId: null,
       messages: [],
       inputText: '',
       streaming: false,
@@ -126,10 +183,21 @@ export default {
     },
     otherModels() {
       return this.models.filter(m => !(m.isDefault || m.is_default) && !m.is_backup)
+    },
+    onlineNodes() {
+      return this.nodes.filter(n => n.status === 'online')
+    },
+    selectedNodeInfo() {
+      return this.nodes.find(n => n.id === this.selectedNodeId) || null
+    },
+    selectedModelLabel() {
+      const m = this.models.find(m => m.id === this.selectedModelId)
+      return m ? m.name : '未选择'
     }
   },
   mounted() {
     this.fetchModels()
+    this.fetchNodes()
   },
   beforeDestroy() {
     if (this.currentController) {
@@ -137,6 +205,22 @@ export default {
     }
   },
   methods: {
+    async fetchNodes() {
+      try {
+        const res = await getNodeList()
+        this.nodes = res.data?.list || []
+      } catch (e) {
+        console.error('获取节点列表失败:', e)
+      }
+    },
+    handleNodeChange(val) {
+      this.selectedNodeId = val
+      if (val) {
+        this.$message.success(`已切换到节点: ${this.selectedNodeInfo?.node_name}`)
+      } else {
+        this.$message.info('已切换到本地执行')
+      }
+    },
     async fetchModels() {
       try {
         const res = await listModels()
@@ -201,14 +285,17 @@ export default {
       
       this.streaming = true
       this.streamingText = ''
+
+      // 附加节点信息
+      const nodeId = this.selectedNodeId || null
       
       if (this.streamMode) {
-        await this.streamChat(model, messages)
+        await this.streamChat(model, messages, nodeId)
       } else {
-        await this.normalChat(model, messages)
+        await this.normalChat(model, messages, nodeId)
       }
     },
-    async streamChat(model, messages) {
+    async streamChat(model, messages, nodeId = null) {
       this.currentController = new AbortController()
       
       try {
@@ -224,7 +311,8 @@ export default {
           body: JSON.stringify({
             model_path: model.modelPath || `${model.provider}/${model.modelId}`,
             messages: messages,
-            stream: true
+            stream: true,
+            node_id: nodeId
           }),
           signal: this.currentController.signal
         })
@@ -294,7 +382,7 @@ export default {
       }
       return ''
     },
-    async normalChat(model, messages) {
+    async normalChat(model, messages, nodeId = null) {
       try {
         const token = localStorage.getItem('token')
         const baseURL = import.meta.env?.VITE_API_URL || import.meta.env?.DEV ? '/api' : ''
@@ -308,7 +396,8 @@ export default {
           body: JSON.stringify({
             model_path: model.modelPath || `${model.provider}/${model.modelId}`,
             messages: messages,
-            stream: false
+            stream: false,
+            node_id: nodeId
           })
         })
         
@@ -470,6 +559,13 @@ export default {
   justify-content: space-between;
   align-items: center;
   margin-top: 10px;
+}
+.chat-quick-bar {
+  display: flex;
+  align-items: center;
+  padding: 8px 0;
+  margin-bottom: 8px;
+  border-bottom: 1px solid #eee;
 }
 .model-item {
   padding: 8px 0;

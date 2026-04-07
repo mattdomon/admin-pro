@@ -4,7 +4,7 @@ declare(strict_types=1);
 namespace app\controller\ai;
 
 use app\controller\BaseController;
-use app\model\Model as AiModel;
+use app\service\OpenClawConfigService;
 
 class Chat extends BaseController
 {
@@ -32,15 +32,31 @@ class Chat extends BaseController
             $nodeId = $body['node_id'] ?? null;  // 节点ID，空则本地执行
             
             // 获取模型配置
+            $configService = new OpenClawConfigService();
             $modelConfig = null;
             
             // 方式1：通过 OpenClaw 配置的完整路径（如 claudeagent/claude-sonnet-4-6）
             if ($modelPath) {
-                $modelConfig = $this->findModelByPath($modelPath);
+                $modelConfig = $this->findModelByPath($modelPath, $configService);
             }
-            // 方式2：通过本地模型ID
-            elseif ($modelId) {
-                $modelConfig = AiModel::find((int)$modelId);
+            // 方式2：通过本地模型ID（暂时跳过，没有数据库模型）
+            // elseif ($modelId) {
+            //     $modelConfig = AiModel::find((int)$modelId);
+            // }
+            
+            // 如果没有指定模型，使用默认主要模型
+            if (!$modelConfig) {
+                $modelConfig = $configService->getPrimaryModel();
+            }
+            
+            // 如果主要模型不可用，尝试备用模型
+            if (!$modelConfig) {
+                $modelConfig = $configService->getFallbackModel();
+            }
+            
+            // 如果都没有，使用第一个可用模型
+            if (!$modelConfig) {
+                $modelConfig = $configService->getFirstAvailableModel();
             }
             
             if (!$modelConfig) {
@@ -53,9 +69,10 @@ class Chat extends BaseController
             }
             
             // ── 本地执行模式 ──
-            $apiKey = $modelConfig['apiKey'] ?? '';
-            $apiType = $modelConfig['api'] ?? 'openai-completions';
-            $modelIdentifier = $modelConfig['modelId'] ?? ($modelConfig['name'] ?? '');
+            $baseUrl = $modelConfig['base_url'] ?? '';
+            $apiKey = $modelConfig['api_key'] ?? '';
+            $apiType = $modelConfig['api_type'] ?? 'openai-completions';
+            $modelIdentifier = $modelConfig['model_id'] ?? ($modelConfig['name'] ?? '');
             
             if (empty($baseUrl) || empty($apiKey)) {
                 return $this->error('模型Base URL或API Key未配置');
@@ -92,11 +109,11 @@ class Chat extends BaseController
             'task'    => [
                 'type'    => 'ai',
                 'payload' => [
-                    'model_path' => $modelConfig['provider'] . '/' . $modelConfig['modelId'],
+                    'model_path' => $modelConfig['model_path'],
                     'messages'   => $messages,
-                    'base_url'   => $modelConfig['baseUrl'],
-                    'api_key'    => $modelConfig['apiKey'],
-                    'api_type'   => $modelConfig['api'] ?? 'openai',
+                    'base_url'   => $modelConfig['base_url'],
+                    'api_key'    => $modelConfig['api_key'],
+                    'api_type'   => $modelConfig['api_type'] ?? 'openai',
                 ],
             ],
         ];
@@ -119,36 +136,65 @@ class Chat extends BaseController
     /**
      * 根据路径查找 OpenClaw 配置中的模型
      */
-    private function findModelByPath(string $modelPath): ?array
+    private function findModelByPath(string $modelPath, OpenClawConfigService $configService): ?array
     {
-        $configPath = getenv('HOME') . '/.openclaw/openclaw.json';
-        if (!file_exists($configPath)) {
+        $parts = explode('/', $modelPath, 2);
+        if (count($parts) !== 2) {
             return null;
         }
         
-        $config = json_decode(file_get_contents($configPath), true);
-        $providers = $config['models']['providers'] ?? [];
+        [$providerId, $modelId] = $parts;
         
-        foreach ($providers as $providerId => $providerConfig) {
-            if (!isset($providerConfig['models']) || !is_array($providerConfig['models'])) {
-                continue;
+        // Use the same method as in OpenClawConfigService
+        try {
+            $config = $this->readConfig();
+            $providers = $config['models']['providers'] ?? [];
+            
+            if (!isset($providers[$providerId])) {
+                return null;
             }
-            foreach ($providerConfig['models'] as $model) {
-                $fullPath = "{$providerId}/{$model['id']}";
-                if ($fullPath === $modelPath) {
+            
+            $provider = $providers[$providerId];
+            $models = $provider['models'] ?? [];
+            
+            foreach ($models as $model) {
+                if ($model['id'] === $modelId) {
                     return [
-                        'modelId' => $model['id'],
+                        'model_id' => $model['id'],
+                        'model_path' => $modelPath,
                         'name' => $model['name'] ?? $model['id'],
                         'provider' => $providerId,
-                        'baseUrl' => $providerConfig['baseUrl'] ?? '',
-                        'apiKey' => $providerConfig['apiKey'] ?? '',
-                        'api' => $model['api'] ?? $providerConfig['api'] ?? 'openai-completions',
+                        'base_url' => $provider['baseUrl'] ?? '',
+                        'api_key' => $provider['apiKey'] ?? '',
+                        'api_type' => $provider['api'] ?? 'openai-completions',
                     ];
                 }
             }
+            
+            return null;
+        } catch (\Exception $e) {
+            return null;
         }
-        
-        return null;
+    }
+    
+    /**
+     * Read OpenClaw config
+     */
+    private function readConfig(): array
+    {
+        $configPath = getenv('HOME') . '/.openclaw/openclaw.json';
+        if (!file_exists($configPath)) {
+            throw new \Exception('openclaw.json 不存在');
+        }
+        $content = file_get_contents($configPath);
+        if (!$content) {
+            throw new \Exception('无法读取 openclaw.json');
+        }
+        $config = json_decode($content, true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            throw new \Exception('openclaw.json 解析失败: ' . json_last_error_msg());
+        }
+        return $config;
     }
     
     /**
@@ -169,7 +215,7 @@ class Chat extends BaseController
         
         $ch = curl_init();
         curl_setopt_array($ch, [
-            CURLOPT_URL => $baseUrl . '/v1/chat/completions',
+            CURLOPT_URL => rtrim($baseUrl, '/') . '/chat/completions',
             CURLOPT_RETURNTRANSFER => !$stream,
             CURLOPT_POST => true,
             CURLOPT_TIMEOUT => 60,

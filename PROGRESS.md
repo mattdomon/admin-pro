@@ -1,7 +1,7 @@
 # PROGRESS.md - Admin Pro 开发进度
 
-> **项目状态**: 🚀 Release v1.1 开发中，节点管理 + 任务调度扩展  
-> **最后更新**: 2026-04-07 18:04 by HC Coding  
+> **项目状态**: 🚀 Release v1.2 开发中，AI会话节点执行 + 监控增强  
+> **最后更新**: 2026-04-07 21:53 by HC Coding  
 > **GitHub**: https://github.com/mattdomon/admin-pro
 
 ---
@@ -136,6 +136,44 @@
 - [x] **LogService.php** - 日志服务修复
 - [x] **Manager.vue** - 脚本管理界面功能增强
 - [x] **Home.vue** - 首页仪表盘更新
+
+---
+
+## 🆕 Release v1.2 新增功能 (2026-04-07 晚)
+
+### 🤖 AI会话 × 节点执行（核心特性）
+- [x] **节点选择器** - Chat.vue 左侧边栏顶部，只显示在线节点
+- [x] **模型快捷切换** - 输入框上方快捷栏，节点+模型一键切换
+- [x] **状态栏显示** - 底部实时显示当前模型和节点信息
+- [x] **节点异步执行** - 选择节点后消息通过 GatewayWorker 派发到目标节点
+- [x] **轮询机制** - 节点模式下异步轮询结果（最长60s超时）
+- [x] **消息标签** - 气泡显示执行节点名称
+- [x] **本地执行** - 不选节点默认本地执行，向下兼容
+
+### 🐍 bridge.py 真实AI调用
+- [x] **_process_ai_task** - 真实 AI API 调用实现
+- [x] **多格式支持** - OpenAI 兼容格式 + Anthropic 格式双支持
+- [x] **动态参数** - 从 payload 获取 base_url/api_key/model_path
+- [x] **bridge.py 大重构** - +240行，完善任务类型处理
+
+### 📊 监控增强
+- [x] **MonitorCtrl.php** - 新建监控控制器（+103行）
+- [x] **Realtime.vue** - 实时监控面板优化
+- [x] **realtime.js Store** - 状态管理大幅重构（+370行）
+- [x] **taskNotifier.js** - 通知客户端增强（+58行）
+- [x] **monitor.js API** - 监控接口封装（+34行）
+
+### 🔧 后端架构优化
+- [x] **Events.php** - GatewayWorker 事件处理增强（+69行）
+- [x] **Chat.php** - AI聊天控制器重构（+106行），支持节点路由
+- [x] **route/app.php** - 路由重组和接口扩展
+- [x] **删除 ChatController.php** - 合并到 Chat.php，减少冗余（-210行）
+- [x] **Manager.vue 增强** - 脚本管理界面追加功能（+36行）
+
+### 📈 本次变更统计
+- **文件变更**: 13个文件
+- **代码变化**: +980行 / -415行
+- **净增加**: ~565行有效代码
 
 ---
 

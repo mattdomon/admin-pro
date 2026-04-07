@@ -1,0 +1,49 @@
+{
+  "id": "ai_69d4fd6d17af6",
+  "type": "ai",
+  "payload": {
+    "model_path": "claudeagent/claude-sonnet-4-6",
+    "messages": [
+      {
+        "role": "user",
+        "content": "你好"
+      }
+    ],
+    "base_url": "https://claudeagent.com.cn/v1",
+    "api_key": "sk-7pigRMTWC98abGZo3BMFIW6Xoa4XBw4XJUw8uneMh3adyRLn",
+    "api_type": "openai-completions"
+  },
+  "status": "success",
+  "created_at": 1775566189.098428,
+  "started_at": 1775566190.680733,
+  "completed_at": 1775566193.653364,
+  "result": {
+    "content": "你好！很高兴见到你！有什么我可以帮助你的吗？😊",
+    "model": "claudeagent/claude-sonnet-4-6",
+    "usage": {
+      "prompt_tokens": 10,
+      "completion_tokens": 31,
+      "total_tokens": 41,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "text_tokens": 0,
+        "audio_tokens": 0,
+        "image_tokens": 0
+      },
+      "completion_tokens_details": {
+        "text_tokens": 0,
+        "audio_tokens": 0,
+        "reasoning_tokens": 0
+      },
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "input_tokens_details": null,
+      "claude_cache_creation_5_m_tokens": 0,
+      "claude_cache_creation_1_h_tokens": 0
+    }
+  },
+  "error": null,
+  "retries": 0,
+  "max_retries": 3,
+  "timeout": 300
+}

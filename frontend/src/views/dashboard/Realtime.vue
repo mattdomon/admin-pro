@@ -72,14 +72,12 @@
           <div v-else>
             <div 
               v-for="node in onlineNodes" 
-              :key="node.uuid" 
+              :key="node.node_key" 
               class="node-item"
             >
               <div class="node-info">
-                <el-tag :type="getNodeStatusType(node.status)" size="mini">
-                  {{ getNodeStatusText(node.status) }}
-                </el-tag>
-                <span class="node-name">{{ node.uuid }}</span>
+                <el-tag type="success" size="mini">在线</el-tag>
+                <span class="node-name">{{ node.node_name || node.node_key }}</span>
               </div>
               <div class="node-stats" v-if="node.sysInfo">
                 <el-progress
@@ -196,7 +194,7 @@ export default {
   },
   
   methods: {
-    ...mapActions('realtime', ['initWebSocket']),
+    ...mapActions('realtime', ['initWebSocket', 'disconnectWebSocket']),
     
     getNodeStatusType(status) {
       const map = { 0: 'info', 1: 'success', 2: 'warning', 3: 'danger' }
@@ -246,6 +244,10 @@ export default {
   mounted() {
     // 初始化 WebSocket 连接
     this.initWebSocket()
+  },
+
+  beforeDestroy() {
+    this.disconnectWebSocket()
   },
   
   watch: {

@@ -174,7 +174,8 @@ export default {
       streaming: false,
       streamingText: '',
       streamMode: true,
-      currentController: null
+      currentController: null,
+      currentTaskId: null  // 🚀 新增：当前任务ID，用于匹配流式数据
     }
   },
   computed: {
@@ -201,11 +202,17 @@ export default {
   mounted() {
     this.fetchModels()
     this.fetchNodes()
+    
+    // 🚀 新增：初始化 WebSocket 连接
+    this.initWebSocket()
   },
   beforeDestroy() {
     if (this.currentController) {
       this.currentController.abort()
     }
+    
+    // 🚀 清理 WebSocket 监听器
+    this.cleanupWebSocket()
   },
   methods: {
     async fetchNodes() {
@@ -273,6 +280,8 @@ export default {
       // Shift+Enter 的默认行为是换行
     },
     async sendToAI(userMessage) {
+      // 获取选中的模型配置
+      const model = this.models.find(m => m.id === this.selectedModelId)
       if (!model) {
         this.$message.error('未找到选择的模型')
         return
@@ -286,16 +295,19 @@ export default {
       
       this.streaming = true
       this.streamingText = ''
+      this.currentTaskId = null  // 重置任务ID
 
       // 附加节点信息
       const nodeId = this.selectedNodeId || null
       
       if (nodeId) {
-        // 节点模式：异步任务，轮询结果
+        // 节点模式：异步任务 + WebSocket 流式反馈
         await this.nodeChat(model, messages, nodeId)
       } else if (this.streamMode) {
+        // 本地流式模式
         await this.streamChat(model, messages, null)
       } else {
+        // 本地非流式模式
         await this.normalChat(model, messages, null)
       }
     },
@@ -329,23 +341,21 @@ export default {
           throw new Error('未获取到 task_id')
         }
         
+        // 🚀 保存当前任务ID，用于匹配流式数据
+        this.currentTaskId = taskId
+        
         this.streamingText = `⏳ 任务已下发 (${data.data.node_name})，等待节点响应...`
         
-        // 轮询任务结果（最多60秒）
-        const result = await this.pollTaskResult(taskId, 60)
+        console.log('📎 设置当前任务ID:', taskId, '，等待 WebSocket 流式数据')
         
-        this.messages.push({
-          role: 'assistant',
-          content: result,
-          time: this.formatTime(new Date()),
-          node: data.data.node_name
-        })
+        // 不需要轮询，等待 WebSocket 流式数据
+        // WebSocket 会通过 handleChatStream 处理实时数据
         
       } catch (e) {
         this.$message.error('节点执行失败: ' + e.message)
-      } finally {
         this.streaming = false
         this.streamingText = ''
+        this.currentTaskId = null
         this.scrollToBottom()
       }
     },
@@ -545,6 +555,109 @@ export default {
       }).then(() => {
         this.messages = []
       }).catch(() => {})
+    },
+    
+    // 🚀 新增：WebSocket 相关方法
+    async initWebSocket() {
+      try {
+        // 首先建立 WebSocket 连接
+        this.$connectTaskNotifier('ws://localhost:8282')
+        
+        // 等待连接就绪后再绑定事件
+        setTimeout(() => {
+          if (this.$taskNotifier) {
+            // 监听 AI 流式输出事件
+            this.$taskNotifier.on('chat_stream', this.handleChatStream)
+            this.$taskNotifier.on('chat_stream_complete', this.handleChatStreamComplete)
+            
+            // 监听连接状态
+            this.$taskNotifier.on('connected', () => {
+              console.log('🟢 Chat.vue WebSocket 已连接')
+            })
+            
+            this.$taskNotifier.on('disconnected', () => {
+              console.log('🔴 Chat.vue WebSocket 已断开')
+            })
+            
+            console.log('🔌 Chat.vue 已设置 WebSocket 监听器')
+          } else {
+            console.error('⚠️ taskNotifier 未初始化，无法接收流式数据')
+          }
+        }, 500) // 给WebSocket建立连接留点时间
+        
+      } catch (e) {
+        console.error('初始化 WebSocket 失败:', e)
+      }
+    },
+    
+    cleanupWebSocket() {
+      if (this.$taskNotifier) {
+        this.$taskNotifier.off('chat_stream', this.handleChatStream)
+        this.$taskNotifier.off('chat_stream_complete', this.handleChatStreamComplete)
+        
+        // 断开 WebSocket 连接
+        this.$disconnectTaskNotifier()
+      }
+    },
+    
+    // 💬 处理 AI 流式数据
+    handleChatStream(data) {
+      const { task_id, content, status } = data
+      
+      console.log('💬 Chat.vue 收到 chat_stream:', {
+        task_id: task_id?.slice(-8),
+        content_len: content?.length || 0,
+        status
+      })
+      
+      // 只处理当前任务的流式数据
+      if (this.currentTaskId && task_id !== this.currentTaskId) {
+        console.log('🔄 忽略非当前任务的流式数据')
+        return
+      }
+      
+      if (status === 'processing' && content) {
+        // 初次收到流式数据，创建 AI 消息气泡
+        if (!this.streaming) {
+          this.streaming = true
+          this.streamingText = content
+        } else {
+          // 追加内容
+          this.streamingText += content
+        }
+        
+        // 自动滚动到底部
+        this.scrollToBottom()
+        
+      } else if (status === 'completed') {
+        // 流式输出完成，将内容加入正式消息列表
+        if (this.streaming && this.streamingText) {
+          this.messages.push({
+            role: 'assistant',
+            content: this.streamingText,
+            time: this.formatTime(new Date())
+          })
+        }
+        
+        // 清理流式状态
+        this.streaming = false
+        this.streamingText = ''
+        this.currentTaskId = null
+        
+        this.scrollToBottom()
+      }
+    },
+    
+    handleChatStreamComplete(data) {
+      const { task_id } = data
+      
+      console.log('✅ Chat.vue AI 流式输出完成:', task_id?.slice(-8))
+      
+      // 确保清理流式状态
+      if (this.currentTaskId === task_id) {
+        this.streaming = false
+        this.currentTaskId = null
+      }
     }
   }
 }

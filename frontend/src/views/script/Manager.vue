@@ -666,6 +666,10 @@ export default {
         // 监听任务开始事件
         this.$taskNotifier.on('task_started', this.handleTaskStarted)
         
+        // 🚀 新增：监听 AI 流式聊天事件
+        this.$taskNotifier.on('chat_stream', this.handleChatStream)
+        this.$taskNotifier.on('chat_stream_complete', this.handleChatStreamComplete)
+        
         // 监听连接状态
         this.$taskNotifier.on('connected', () => {
           this.$logInfo('script-manager', '🟢 任务通知服务已连接')
@@ -728,6 +732,38 @@ export default {
         title: '脚本开始执行',
         message: message || `脚本 ${script_name} 开始执行...`,
         duration: 3000
+      })
+      
+      // 刷新任务列表
+      this.loadTasks()
+    },
+
+    // 🚀 新增：AI 流式聊天事件处理
+    handleChatStream(data) {
+      const { task_id, content, status } = data
+      
+      if (status === 'processing' && content) {
+        // 流式输出中，实时显示进度
+        this.$logInfo('script-manager', `💬 AI流式输出: ${content.length}字符`, {
+          task_id: task_id.slice(-8),
+          content_preview: content.slice(0, 50)
+        })
+        
+        // 可以在这里处理实时显示逻辑
+        // 比如更新UI中的进度条或实时内容
+        
+      } else if (status === 'completed') {
+        this.$logInfo('script-manager', `✅ AI流式输出完成: ${task_id.slice(-8)}`)
+      }
+    },
+    
+    handleChatStreamComplete(data) {
+      const { taskId } = data
+      
+      this.$notify.success({
+        title: 'AI 会话完成',
+        message: `任务 ${taskId.slice(-8)} 的 AI 回答已完成`,
+        duration: 4000
       })
       
       // 刷新任务列表

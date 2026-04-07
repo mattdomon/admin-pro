@@ -91,13 +91,19 @@ class Events
         }
 
         $type = $data['type'] ?? ($data['action'] ?? '');
+        
+        // 🐛 调试日志5：PHP网关收到消息
+        echo "Gateway Received: " . $type . "\n";
+        echo "Full message: " . $message . "\n";
 
-        // 未鉴权的连接，只处理 auth 包
+        // 未鉴权的连接，处理 auth（Python节点）和 web_register（Web前端）
         if (isset(self::$pendingAuth[$clientId])) {
             if ($type === 'auth') {
                 self::handleAuth($clientId, $data);
+            } elseif ($type === 'web_register') {
+                self::handleWebRegister($clientId, $data);
             } else {
-                // 非 auth 包但还未鉴权，直接拒绝
+                // 非 auth / web_register 包但还未鉴权，直接拒绝
                 Gateway::sendToClient($clientId, json_encode([
                     'type'  => 'auth_required',
                     'error' => '请先发送鉴权包',
@@ -114,6 +120,7 @@ class Events
             'task_killed'   => self::handleTaskKilled($clientId, $data),
             'web_register'  => self::handleWebRegister($clientId, $data), // Web 前端注册
             'cot_logs'      => self::handleLogs($clientId, $data),
+            'chat_stream'   => self::handleChatStream($clientId, $data),  // 🚀 新增：AI流式数据
             default         => trace("[Gateway] 未知 type: {$type} from {$clientId}", 'warning'),
         };
     }
@@ -279,16 +286,29 @@ class Events
                 'type'  => 'error',
                 'error' => 'Token 无效或已过期',
             ]));
+            // 鉴权失败，关闭连接
+            Gateway::closeClient($clientId);
+            if (isset(self::$pendingAuth[$clientId])) {
+                Timer::del(self::$pendingAuth[$clientId]);
+                unset(self::$pendingAuth[$clientId]);
+            }
             return;
         }
 
         $userId = $userInfo['user_id'];
 
+        // ✅ 鉴权成功！立刻销毁超时定时器，防止前端被踢
+        if (isset(self::$pendingAuth[$clientId])) {
+            Timer::del(self::$pendingAuth[$clientId]);
+            unset(self::$pendingAuth[$clientId]);
+            trace("[Gateway] Web前端鉴权定时器已销毁: clientId={$clientId}", 'info');
+        }
+
         // 绑定 UID = "web:{user_id}"（一个用户可多个 Tab，所以用 group 概念）
         $uid = "web:{$userId}";
         Gateway::bindUid($clientId, $uid);
 
-        trace("[Gateway] Web前端注册: user_id={$userId}, clientId={$clientId}", 'info');
+        trace("[Gateway] Web前端注册: user_id={$userId}, uid={$uid}, clientId={$clientId}", 'info');
 
         // 返回当前用户的所有节点在线状态
         $nodes = NodeKey::where('user_id', $userId)
@@ -434,6 +454,49 @@ class Events
             }
             $task->save(['error_traceback' => $existing]);
         }
+    }
+    
+    /**
+     * 处理 AI 流式数据（新增）
+     * 
+     * 数据格式：
+     * {"type": "chat_stream", "task_id": "xxx", "content": "增量字符", "status": "processing"}
+     * {"type": "chat_stream", "task_id": "xxx", "content": "", "status": "completed"}
+     */
+    private static function handleChatStream(string $clientId, array $data): void
+    {
+        $taskId  = $data['task_id'] ?? '';
+        $content = $data['content'] ?? '';
+        $status  = $data['status'] ?? 'processing';
+        $nodeKey = Gateway::getUidByClientId($clientId);
+        
+        if (empty($taskId)) {
+            echo "❌ chat_stream 消息缺少 task_id\n";
+            return;
+        }
+        
+        echo "💬 处理 chat_stream: task_id={$taskId}, status={$status}, content_len=" . strlen($content) . "\n";
+        
+        // 查找该任务属于哪个用户，路由给对应的 Web 前端
+        // 这里需要根据 task_id 查找到用户，然后转发给该用户的所有 Web 客户端
+        $node = NodeKey::where('node_key', $nodeKey)->find();
+        if (!$node) {
+            echo "❌ 找不到节点信息: node_key={$nodeKey}\n";
+            return;
+        }
+        
+        $userId = $node->user_id;
+        echo "📡 转发 chat_stream 给用户 {$userId} 的 Web 前端\n";
+        
+        // 转发给该用户的所有 Web 前端
+        self::broadcastToUserWebs($userId, [
+            'type'      => 'chat_stream',
+            'task_id'   => $taskId,
+            'content'   => $content,
+            'status'    => $status,
+            'node_key'  => $nodeKey,
+            'timestamp' => time(),
+        ]);
     }
 
     // ─────────────────────────────────────────

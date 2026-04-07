@@ -1,0 +1,25 @@
+{
+  "id": "ai_69d4fb993fdab",
+  "type": "ai",
+  "payload": {
+    "model_path": "claudeagent/claude-sonnet-4-6",
+    "messages": [
+      {
+        "role": "user",
+        "content": "nihao"
+      }
+    ],
+    "base_url": "https://claudeagent.com.cn/v1",
+    "api_key": "sk-7pigRMTWC98abGZo3BMFIW6Xoa4XBw4XJUw8uneMh3adyRLn",
+    "api_type": "openai-completions"
+  },
+  "status": "failed",
+  "created_at": 1775565721.264498,
+  "started_at": 1775565723.024666,
+  "completed_at": 1775565723.4031029,
+  "result": null,
+  "error": "AI API 返回 404: {\"error\":{\"message\":\"Invalid URL (POST /v1/v1/chat/completions)\",\"type\":\"invalid_request_error\",\"param\":\"\",\"code\":\"\"}}",
+  "retries": 0,
+  "max_retries": 3,
+  "timeout": 300
+}

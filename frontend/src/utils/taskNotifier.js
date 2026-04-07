@@ -86,16 +86,20 @@ class TaskNotificationClient {
   registerClient() {
     if (!this.isConnected) return
     
+    // 🚀 修改：使用 PHP Gateway 期待的格式
+    const token = localStorage.getItem('token')
+    if (!token) {
+      console.warn('⚠️ 未找到用户 token，无法注册 WebSocket 客户端')
+      return
+    }
+    
     const registerMsg = {
-      type: 'register',
-      node_id: this.nodeId,
-      timestamp: Date.now() / 1000,
-      client_type: 'web_frontend',
-      capabilities: ['task_notifications', 'error_handling']
+      type: 'web_register',  // 改为 PHP Events.php 期待的类型
+      token: token          // 使用用户 token 进行身份验证
     }
     
     this.send(registerMsg)
-    console.log(`📝 已发送客户端注册: ${this.nodeId}`)
+    console.log('📝 已发送 Web 前端注册消息')
   }
   
   /**
@@ -124,15 +128,57 @@ class TaskNotificationClient {
       case 'task_notification':
         this.handleTaskNotification(data)
         break
+      
+      case 'chat_stream':  // 🚀 新增：流式聊天数据处理
+        this.handleChatStream(data)
+        break
         
       case 'register_response':
         console.log('✅ 客户端注册成功:', data.message)
+        break
+        
+      case 'web_registered':  // 🚀 新增：处理 Web 前端注册成功响应
+        console.log('✅ Web 前端注册成功，在线节点:', data.nodes?.length || 0)
+        this.emit('web_registered', data)
+        break
+        
+      case 'node_online':   // 🚀 新增：节点上线通知
+      case 'node_offline':  // 🚀 新增：节点下线通知
+        console.log(`🔄 节点状态变化: ${type}`, data.node_name)
+        this.emit(type, data)
         break
         
       default:
         console.log('📨 收到消息:', data)
         this.emit('message', data)
     }
+  }
+  
+  /**
+   * 处理流式聊天数据（新增）
+   */
+  handleChatStream(data) {
+    const { task_id, content, status } = data
+    
+    if (status === 'processing' && content) {
+      // 增量数据，实时显示
+      console.log(`💬 流式输出 [${task_id.slice(0, 8)}]: ${content}`)
+      this.emit('chat_stream_chunk', {
+        taskId: task_id,
+        content: content,
+        status: status
+      })
+    } else if (status === 'completed') {
+      // 对话结束
+      console.log(`✅ 流式输出完成: ${task_id.slice(0, 8)}`)
+      this.emit('chat_stream_complete', {
+        taskId: task_id,
+        status: status
+      })
+    }
+    
+    // 触发通用流事件，供前端监听
+    this.emit('chat_stream', data)
   }
   
   /**

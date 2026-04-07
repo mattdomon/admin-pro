@@ -3,7 +3,7 @@
  * 支持实时数据获取和历史趋势分析
  */
 
-import request from './request'
+import request from '@/utils/request'
 
 // 获取监控数据趋势 (24小时内)
 export function getMonitorTrends(hours = 24) {
@@ -37,6 +37,38 @@ export function saveMetrics(data) {
     url: '/api/monitor/saveMetrics',
     method: 'post',
     data
+  })
+}
+
+// 获取系统健康概览（SystemMonitor.vue 用）
+export function getSystemOverview() {
+  return request({
+    url: '/api/monitor/overview',
+    method: 'get'
+  })
+}
+
+// 获取设备健康状态
+export function getDeviceHealth() {
+  return request({
+    url: '/api/monitor/devices',
+    method: 'get'
+  })
+}
+
+// 获取告警规则
+export function getAlertRules() {
+  return request({
+    url: '/api/monitor/alert-rules',
+    method: 'get'
+  })
+}
+
+// 运行系统健康检查
+export function runSystemCheck() {
+  return request({
+    url: '/api/monitor/check',
+    method: 'get'
   })
 }
 

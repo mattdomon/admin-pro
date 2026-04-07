@@ -1,21 +1,35 @@
 /**
  * WebSocket 实时状态管理 Store
+ * 
+ * 修复记录（2026-04-07）：
+ * - 连接时发送 web_register（而非旧的 auth）
+ * - 消息处理改为 type 字段（Gateway 推送格式）
+ * - 支持 node_online / node_offline 实时更新节点状态
+ * - 支持 task_result / task_progress 实时更新任务状态
+ * - 系统统计通过 API 轮询补充（Gateway 不广播 system_stats）
  */
+
+import { getMonitorOverview } from '@/api/monitor'
+
+let wsInstance = null
+let statsTimer = null
+let reconnectTimer = null
 
 export default {
   namespaced: true,
+
   state: {
     // WebSocket 连接状态
     wsConnected: false,
     wsReconnecting: false,
     wsError: null,
-    
-    // 实时节点状态
+
+    // 实时节点状态 { node_key: { node_key, node_name, status, last_heartbeat, sysInfo } }
     liveNodes: {},
-    
-    // 实时任务状态  
+
+    // 实时任务状态 { task_id: { taskId, status, nodeKey, progress } }
     liveTasks: {},
-    
+
     // 系统统计
     systemStats: {
       totalNodes: 0,
@@ -23,193 +37,311 @@ export default {
       runningTasks: 0,
       todayTasks: 0
     },
-    
-    // 实时日志流
-    taskLogs: {},
+
+    // 实时日志流 { task_id: [...logs] }
+    taskLogs: {}
   },
-  
+
   mutations: {
-    // WebSocket 连接状态
     SET_WS_CONNECTED(state, connected) {
       state.wsConnected = connected
     },
-    
     SET_WS_RECONNECTING(state, reconnecting) {
       state.wsReconnecting = reconnecting
     },
-    
     SET_WS_ERROR(state, error) {
       state.wsError = error
     },
-    
-    // 节点状态更新
-    UPDATE_NODE_STATUS(state, { uuid, status, sysInfo, lastHeartbeat }) {
-      if (!state.liveNodes[uuid]) {
-        state.liveNodes[uuid] = {}
-      }
-      
-      state.liveNodes[uuid] = {
-        ...state.liveNodes[uuid],
-        uuid,
-        status,
-        sysInfo,
-        lastHeartbeat,
-        lastUpdate: Date.now()
+
+    // 批量初始化节点列表（web_registered 时）
+    INIT_NODES(state, nodes) {
+      const map = {}
+      nodes.forEach(n => { map[n.node_key] = n })
+      state.liveNodes = map
+      // 同步统计
+      const online = nodes.filter(n => n.status === 'online').length
+      state.systemStats = {
+        ...state.systemStats,
+        totalNodes: nodes.length,
+        onlineNodes: online
       }
     },
-    
-    REMOVE_NODE(state, uuid) {
-      delete state.liveNodes[uuid]
+
+    // 节点上线
+    SET_NODE_ONLINE(state, { node_key, node_name }) {
+      const existing = state.liveNodes[node_key] || {}
+      state.liveNodes = {
+        ...state.liveNodes,
+        [node_key]: { ...existing, node_key, node_name, status: 'online', last_heartbeat: Math.floor(Date.now() / 1000) }
+      }
+      // 重新统计
+      const online = Object.values(state.liveNodes).filter(n => n.status === 'online').length
+      state.systemStats = { ...state.systemStats, onlineNodes: online, totalNodes: Object.keys(state.liveNodes).length }
     },
-    
+
+    // 节点离线
+    SET_NODE_OFFLINE(state, { node_key, node_name }) {
+      const existing = state.liveNodes[node_key] || {}
+      state.liveNodes = {
+        ...state.liveNodes,
+        [node_key]: { ...existing, node_key, node_name, status: 'offline' }
+      }
+      const online = Object.values(state.liveNodes).filter(n => n.status === 'online').length
+      state.systemStats = { ...state.systemStats, onlineNodes: online }
+    },
+
+    // 节点心跳更新 sysInfo
+    UPDATE_NODE_HEARTBEAT(state, { node_key, cpu, mem, last_heartbeat }) {
+      if (state.liveNodes[node_key]) {
+        state.liveNodes = {
+          ...state.liveNodes,
+          [node_key]: {
+            ...state.liveNodes[node_key],
+            sysInfo: { cpu, mem },
+            last_heartbeat: last_heartbeat || Math.floor(Date.now() / 1000)
+          }
+        }
+      }
+    },
+
     // 任务状态更新
-    UPDATE_TASK_STATUS(state, { taskId, status, deviceUuid, progress }) {
-      if (!state.liveTasks[taskId]) {
-        state.liveTasks[taskId] = {}
+    UPDATE_TASK_STATUS(state, { taskId, status, nodeKey, progress }) {
+      state.liveTasks = {
+        ...state.liveTasks,
+        [taskId]: { ...state.liveTasks[taskId], taskId, status, nodeKey, progress, lastUpdate: Date.now() }
       }
-      
-      state.liveTasks[taskId] = {
-        ...state.liveTasks[taskId],
-        taskId,
-        status,
-        deviceUuid,
-        progress,
-        lastUpdate: Date.now()
+      // 完成/失败时移除
+      if (['completed', 'failed', 'killed'].includes(status)) {
+        const next = { ...state.liveTasks }
+        delete next[taskId]
+        state.liveTasks = next
       }
+      const running = Object.values(state.liveTasks).filter(t => t.status === 'running').length
+      state.systemStats = { ...state.systemStats, runningTasks: running }
     },
-    
-    REMOVE_TASK(state, taskId) {
-      delete state.liveTasks[taskId]
-    },
-    
-    // 任务日志追加
+
+    // 日志追加
     APPEND_TASK_LOGS(state, { taskId, logs }) {
-      if (!state.taskLogs[taskId]) {
-        state.taskLogs[taskId] = []
-      }
+      if (!state.taskLogs[taskId]) state.taskLogs[taskId] = []
       state.taskLogs[taskId].push(...logs)
-      
-      // 限制日志条数（最多保留1000条）
       if (state.taskLogs[taskId].length > 1000) {
         state.taskLogs[taskId] = state.taskLogs[taskId].slice(-1000)
       }
     },
-    
-    CLEAR_TASK_LOGS(state, taskId) {
-      delete state.taskLogs[taskId]
-    },
-    
-    // 系统统计更新
+
+    // API 轮询统计更新
     UPDATE_SYSTEM_STATS(state, stats) {
       state.systemStats = { ...state.systemStats, ...stats }
     }
   },
-  
+
   actions: {
-    // 初始化 WebSocket 连接
-    initWebSocket({ commit, dispatch }) {
+    /**
+     * 初始化 WebSocket 连接
+     * 连接后发送 web_register（携带 JWT Token）
+     */
+    initWebSocket({ commit, dispatch, state }) {
+      // 避免重复连接
+      if (wsInstance && wsInstance.readyState === WebSocket.OPEN) return
+
+      const token = localStorage.getItem('token') || ''
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      const wsUrl = `${protocol}//${window.location.hostname}:8282`  // 修复: 8283 -> 8282
-      
+      const wsUrl = `${protocol}//${window.location.hostname}:8282`
+
+      console.log('🔗 连接 WebSocket:', wsUrl)
+
       const ws = new WebSocket(wsUrl)
-      
+      wsInstance = ws
+
       ws.onopen = () => {
-        console.log('🔗 WebSocket 连接成功')
+        console.log('✅ WebSocket 已连接，发送 web_register')
         commit('SET_WS_CONNECTED', true)
+        commit('SET_WS_RECONNECTING', false)
         commit('SET_WS_ERROR', null)
-        
-        // 发送认证（前端监控身份）
+
+        // 发送 web_register（Gateway 期待的格式）
         ws.send(JSON.stringify({
-          action: 'auth',
-          uuid: 'FRONTEND_MONITOR',
-          token: 'frontend_monitor_token'
+          type: 'web_register',
+          token: token
         }))
+
+        // 启动 API 轮询统计（每30秒）
+        dispatch('startStatsPoll')
       }
-      
+
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data)
-          dispatch('handleWebSocketMessage', data)
-        } catch (error) {
-          console.error('WebSocket 消息解析失败:', error)
+          dispatch('handleMessage', data)
+        } catch (e) {
+          console.error('WebSocket 消息解析失败:', e)
         }
       }
-      
+
       ws.onclose = () => {
-        console.log('🔌 WebSocket 连接断开')
+        console.log('🔌 WebSocket 断开，5秒后重连')
         commit('SET_WS_CONNECTED', false)
-        
+        wsInstance = null
+
+        // 停止统计轮询
+        if (statsTimer) { clearInterval(statsTimer); statsTimer = null }
+
         // 5秒后重连
-        setTimeout(() => {
+        if (reconnectTimer) clearTimeout(reconnectTimer)
+        reconnectTimer = setTimeout(() => {
           commit('SET_WS_RECONNECTING', true)
           dispatch('initWebSocket')
         }, 5000)
       }
-      
-      ws.onerror = (error) => {
-        console.error('❌ WebSocket 连接错误:', error)
-        commit('SET_WS_ERROR', error.toString())
+
+      ws.onerror = (err) => {
+        console.error('❌ WebSocket 错误:', err)
+        commit('SET_WS_ERROR', 'WebSocket 连接失败，请检查 Gateway 服务')
       }
     },
-    
-    // 处理 WebSocket 消息
-    handleWebSocketMessage({ commit }, data) {
-      switch (data.action) {
-        case 'node_status_update':
-          commit('UPDATE_NODE_STATUS', data.payload)
+
+    /**
+     * 处理 Gateway 推送的消息（统一用 type 字段）
+     */
+    handleMessage({ commit, dispatch }, data) {
+      const type = data.type || data.action || ''
+      console.debug('📨 WS消息:', type, data)
+
+      switch (type) {
+        // Gateway 注册成功，返回所有节点快照
+        case 'web_registered':
+          commit('INIT_NODES', data.nodes || [])
+          console.log('✅ Web注册成功，节点数:', (data.nodes || []).length)
           break
-          
-        case 'task_status_update':
-          commit('UPDATE_TASK_STATUS', data.payload)
+
+        // 节点上线
+        case 'node_online':
+          commit('SET_NODE_ONLINE', { node_key: data.node_key, node_name: data.node_name })
           break
-          
-        case 'task_response':
-          // 处理任务完成响应
+
+        // 节点离线
+        case 'node_offline':
+          commit('SET_NODE_OFFLINE', { node_key: data.node_key, node_name: data.node_name })
+          break
+
+        // 心跳（含 sysInfo）
+        case 'node_heartbeat':
+          commit('UPDATE_NODE_HEARTBEAT', {
+            node_key: data.node_key,
+            cpu: data.cpu,
+            mem: data.mem,
+            last_heartbeat: data.timestamp
+          })
+          break
+
+        // 任务进度
+        case 'task_progress':
           commit('UPDATE_TASK_STATUS', {
-            taskId: data.request_id || data.task_id,
-            status: data.success ? 'success' : 'failed',
-            deviceUuid: data.device_uuid,
-            progress: 100,
-            response: data.response,
-            error: data.error
+            taskId: data.task_id,
+            status: 'running',
+            nodeKey: data.node_key,
+            progress: data.progress || 0
+          })
+          if (data.log) {
+            commit('APPEND_TASK_LOGS', {
+              taskId: data.task_id,
+              logs: [{ level: 'INFO', msg: data.log, ts: data.timestamp || Date.now() / 1000 }]
+            })
+          }
+          break
+
+        // 任务完成
+        case 'task_result':
+          commit('UPDATE_TASK_STATUS', {
+            taskId: data.task_id,
+            status: data.status || 'completed',
+            nodeKey: data.node_key,
+            progress: 100
           })
           break
-          
-        case 'task_logs':
+
+        // AI 流式输出（chat_stream）
+        case 'chat_stream':
           commit('APPEND_TASK_LOGS', {
-            taskId: data.taskId,
-            logs: data.logs
+            taskId: data.task_id,
+            logs: [{ level: 'AI', msg: data.content, ts: data.timestamp || Date.now() / 1000 }]
           })
           break
-          
-        case 'system_stats':
-          commit('UPDATE_SYSTEM_STATS', data.payload)
+
+        // Gateway 欢迎包 / 心跳回应（忽略）
+        case 'require_auth':
+        case 'pong':
+        case 'welcome':
           break
-          
+
+        // Token 无效
+        case 'error':
+          console.warn('Gateway 错误:', data.error)
+          break
+
         default:
-          console.debug('未处理的 WebSocket 消息:', data)
+          console.debug('未处理的 WS 消息 type:', type, data)
       }
+    },
+
+    /**
+     * 启动 API 轮询，补充 Gateway 不广播的统计数据（今日任务数等）
+     */
+    startStatsPoll({ commit }) {
+      if (statsTimer) clearInterval(statsTimer)
+
+      const poll = async () => {
+        try {
+          const res = await getMonitorOverview()
+          if (res.data && res.data.code === 200) {
+            const d = res.data.data
+            commit('UPDATE_SYSTEM_STATS', {
+              todayTasks: d?.tasks?.total_today || 0
+            })
+          }
+        } catch (e) {
+          // 静默失败，不影响 WS 功能
+        }
+      }
+
+      poll() // 立即执行一次
+      statsTimer = setInterval(poll, 30000)
+    },
+
+    /**
+     * 断开 WebSocket（组件销毁时调用）
+     */
+    disconnectWebSocket({ commit }) {
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+      if (statsTimer) { clearInterval(statsTimer); statsTimer = null }
+      if (wsInstance) { wsInstance.close(); wsInstance = null }
+      commit('SET_WS_CONNECTED', false)
+      commit('SET_WS_RECONNECTING', false)
     }
   },
-  
+
   getters: {
     // 在线节点列表
     onlineNodes: (state) => {
-      return Object.values(state.liveNodes).filter(node => node.status === 1)
+      return Object.values(state.liveNodes).filter(n => n.status === 'online')
     },
-    
+
+    // 所有节点列表（含离线）
+    allNodes: (state) => {
+      return Object.values(state.liveNodes)
+    },
+
     // 运行中的任务列表
     runningTasks: (state) => {
-      return Object.values(state.liveTasks).filter(task => task.status === 'running')
+      return Object.values(state.liveTasks).filter(t => t.status === 'running')
     },
-    
+
     // 节点利用率
     nodeUtilization: (state) => {
-      const onlineNodes = Object.values(state.liveNodes).filter(node => node.status === 1)
-      const runningTasks = Object.values(state.liveTasks).filter(task => task.status === 'running')
-      
-      if (onlineNodes.length === 0) return 0
-      return Math.round((runningTasks.length / onlineNodes.length) * 100)
+      const online = Object.values(state.liveNodes).filter(n => n.status === 'online').length
+      const running = Object.values(state.liveTasks).filter(t => t.status === 'running').length
+      if (online === 0) return 0
+      return Math.min(100, Math.round((running / online) * 100))
     }
   }
 }

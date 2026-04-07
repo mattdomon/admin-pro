@@ -256,11 +256,15 @@ class BridgeService:
         await self._notify_task_status_change(task, "started")
         
         try:
-            # 根据任务类型分发到对应处理器
+            # 🚀 核心修复3：AI任务使用单独的后台任务，避免阻塞主循环
+            if task.type == "ai":
+                # AI任务不能阻塞 WebSocket 主循环，放到后台执行
+                asyncio.create_task(self._process_ai_task_async(task))
+                return  # 立即返回，不阻塞主循环
+                
+            # 其他类型任务继续同步处理
             if task.type == "openclaw":
                 result = await self._process_openclaw_task(task)
-            elif task.type == "ai":
-                result = await self._process_ai_task(task)
             elif task.type == "script":
                 result = await self._process_script_task(task)
             elif task.type == "webhook":
@@ -305,6 +309,37 @@ class BridgeService:
         finally:
             await self._save_task(task)
 
+    async def _process_ai_task_async(self, task: Task):
+        """在后台异步处理 AI 任务，不阻塞主循环"""
+        try:
+            logger.info(f"⚙️ 后台AI任务启动: {task.id}")
+            
+            # 调用流式 AI 处理方法
+            result = await self._process_ai_task(task)
+            
+            # 更新任务状态
+            task.status = TaskStatus.SUCCESS
+            task.result = result
+            task.completed_at = time.time()
+            
+            logger.info(f"✅ 后台AI任务完成: {task.id}")
+            
+            # 发送成功通知
+            await self._notify_task_status_change(task, "success")
+            
+        except Exception as e:
+            task.error = str(e)
+            task.status = TaskStatus.FAILED
+            task.completed_at = time.time()
+            
+            logger.error(f"❌ 后台AI任务失败: {task.id} - {e}")
+            
+            # 发送失败通知
+            await self._notify_task_status_change(task, "failed")
+            
+        finally:
+            await self._save_task(task)
+
     async def _process_openclaw_task(self, task: Task) -> Dict[str, Any]:
         """处理OpenClaw任务"""
         payload = task.payload
@@ -323,7 +358,7 @@ class BridgeService:
             raise ValueError(f"未知OpenClaw操作: {action}")
 
     async def _process_ai_task(self, task: Task) -> Dict[str, Any]:
-        """处理AI任务，调用AI API"""
+        """处理AI任务，调用AI API（支持流式输出）"""
         payload = task.payload
         model_path = payload.get('model_path', '')
         messages   = payload.get('messages', [])
@@ -339,39 +374,195 @@ class BridgeService:
         model_id = model_path.split('/')[-1] if '/' in model_path else model_path
         timeout = aiohttp.ClientTimeout(total=120)
 
+        # 🔧 修复URL拼接逻辑，避免重复的 /v1/
+        def build_api_url(base_url: str, endpoint: str) -> str:
+            """智能拼接API URL，避免路径重复"""
+            # 移除base_url末尾的斜杠
+            base = base_url.rstrip('/')
+            
+            # 处理endpoint
+            if api_type == 'anthropic':
+                target_endpoint = '/v1/messages'
+            else:
+                target_endpoint = '/v1/chat/completions'
+            
+            # 检查base_url是否已经包含了/v1
+            if base.endswith('/v1'):
+                # 如果已经有/v1，只添加具体的endpoint
+                if target_endpoint.startswith('/v1/'):
+                    final_endpoint = target_endpoint[3:]  # 去掉 /v1 前缀
+                else:
+                    final_endpoint = target_endpoint
+            else:
+                # 如果没有/v1，使用完整的endpoint
+                final_endpoint = target_endpoint
+            
+            return f"{base}{final_endpoint}"
+
+        # 构建请求头和消息体
         if api_type == 'anthropic':
             headers = {
                 'Content-Type': 'application/json',
                 'x-api-key': api_key,
                 'anthropic-version': '2023-06-01',
             }
-            body = {'model': model_id, 'messages': messages, 'max_tokens': 4096}
-            url = base_url.rstrip('/') + '/v1/messages'
+            body = {
+                'model': model_id, 
+                'messages': messages, 
+                'max_tokens': 4096,
+                'stream': True  # 🔥 开启流式输出
+            }
+            url = build_api_url(base_url, '/v1/messages')
         else:
             headers = {
                 'Content-Type': 'application/json',
                 'Authorization': f'Bearer {api_key}',
             }
-            body = {'model': model_id, 'messages': messages, 'max_tokens': 4096}
-            url = base_url.rstrip('/') + '/v1/chat/completions'
+            body = {
+                'model': model_id, 
+                'messages': messages, 
+                'max_tokens': 4096,
+                'stream': True  # 🔥 开启流式输出
+            }
+            url = build_api_url(base_url, '/v1/chat/completions')
+
+        full_content = ""
+        usage_info = {}
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
+            # 🐛 调试：HTTP请求信息
+            print(f"🚀 发送AI请求: {url}")
+            print(f"🔧 原始base_url: {base_url}")
+            print(f"🎯 最终URL: {url}")
+            print(f"🔑 API Key: ...{api_key[-4:] if api_key else 'None'}")
+            print(f"🤖 Model: {model_id}")
+            print(f"💬 Messages: {len(messages)} 条")
+            
             async with session.post(url, headers=headers, json=body, ssl=False) as resp:
+                print(f"📊 HTTP状态: {resp.status}")
+                print(f"📋 响应头: {dict(resp.headers)}")
+                
                 if resp.status != 200:
                     text = await resp.text()
+                    print(f"❌ API错误内容: {text[:500]}")
                     raise ValueError(f"AI API 返回 {resp.status}: {text[:300]}")
-                data = await resp.json()
 
-        if api_type == 'anthropic':
-            content = ''.join(c.get('text', '') for c in data.get('content', []))
-        else:
-            content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+                # 🚀 核心修复1：异步流式读取，避免阻塞主循环
+                print(f"🗨️ Starting stream processing for task {task.id}")
+                print(f"📁 Content-Type: {resp.headers.get('Content-Type', 'N/A')}")
+                print(f"🔄 Transfer-Encoding: {resp.headers.get('Transfer-Encoding', 'N/A')}")
+                
+                line_count = 0
+                async for line in resp.content:
+                    line_count += 1
+                    print(f"📏 Line {line_count}: {len(line)} bytes")
+                    
+                    if not line.strip():
+                        print("  → Empty line, skipping")
+                        continue
+                    
+                    # 解析 Server-Sent Events 格式
+                    line_str = line.decode('utf-8').strip()
+                    # 🐛 调试日志0：原始行数据
+                    print(f"Raw line: '{line_str}'")
+                    
+                    if not line_str.startswith('data: '):
+                        print("  → Not a data line, skipping")
+                        continue
+                    
+                    data_str = line_str[6:]  # 去掉 'data: ' 前缀
+                    print(f"Data string after prefix removal: '{data_str}'")
+                    
+                    if data_str == '[DONE]':
+                        print("✅ Stream finished with [DONE] marker")
+                        break
+                    
+                    try:
+                        chunk_data = json.loads(data_str)
+                        
+                        # 🐛 调试日志1：原始chunk数据
+                        print(f"Raw chunk_data: {chunk_data}")
+                        
+                        # 提取增量内容
+                        if api_type == 'anthropic':
+                            # Anthropic 格式
+                            if chunk_data.get('type') == 'content_block_delta':
+                                delta_text = chunk_data.get('delta', {}).get('text', '')
+                            else:
+                                delta_text = ''
+                        else:
+                            # OpenAI 格式
+                            choices = chunk_data.get('choices', [])
+                            if choices and 'delta' in choices[0]:
+                                delta_text = choices[0]['delta'].get('content', '')
+                            else:
+                                delta_text = ''
+                        
+                        # 🐛 调试日志2：解析后的增量内容
+                        if delta_text:
+                            print(f"Parsed chunk: '{delta_text}' (len={len(delta_text)})")
+                        
+                        # 🚀 核心修复2：实时发送流数据，格式合规
+                        if delta_text:
+                            full_content += delta_text
+                            
+                            # 立刻通过 WebSocket 发送增量数据
+                            stream_message = {
+                                "type": "chat_stream",
+                                "task_id": task.id,
+                                "content": delta_text,
+                                "status": "processing"
+                            }
+                            
+                            # 🐛 调试日志3：WebSocket发送的消息
+                            print(f"Sending WebSocket message: {stream_message}")
+                            
+                            # 🔥 关键：非阻塞发送，不能 await
+                            asyncio.create_task(self._send_stream_chunk(stream_message))
+                        
+                        # 收集使用统计
+                        if 'usage' in chunk_data:
+                            usage_info = chunk_data['usage']
+                            
+                    except json.JSONDecodeError:
+                        logger.warning(f"无法解析流数据: {data_str}")
+                        continue
+
+        # 🚀 核心修复3：发送结束标记
+        end_message = {
+            "type": "chat_stream",
+            "task_id": task.id,
+            "content": "",
+            "status": "completed"
+        }
+        asyncio.create_task(self._send_stream_chunk(end_message))
 
         return {
-            'content': content,
+            'content': full_content,
             'model': model_path,
-            'usage': data.get('usage', {}),
+            'usage': usage_info,
         }
+
+    async def _send_stream_chunk(self, message: Dict[str, Any]):
+        """非阻塞发送流数据块"""
+        try:
+            # 🐛 调试日志4：WebSocket连接状态检查
+            print(f"WebSocket status: connected={self.ws_connected}, client={self.ws_client is not None}")
+            
+            if self.ws_connected and self.ws_client:
+                json_message = json.dumps(message)
+                print(f"📡 Actually sending to WebSocket: {json_message}")
+                
+                await self.ws_client.send(json_message)
+                
+                logger.debug(f"📡 流数据已发送: task={message['task_id'][:8]}... content_len={len(message['content'])}")
+                print(f"✅ WebSocket send successful")
+            else:
+                print(f"❌ WebSocket not connected, cannot send: connected={self.ws_connected}")
+                logger.warning("⚠️ WebSocket 未连接，无法发送流数据")
+        except Exception as e:
+            print(f"❌ WebSocket send failed: {e}")
+            logger.error(f"发送流数据失败: {e}")
 
     async def _process_script_task(self, task: Task) -> Dict[str, Any]:
         """处理脚本任务"""
@@ -1161,6 +1352,9 @@ pollStatus();
             elif msg_type == 'task_request':
                 # 处理远程任务请求
                 await self._handle_remote_task_request(data)
+            elif msg_type == 'execute_task':
+                # 处理执行任务请求（新格式）
+                await self._handle_execute_task(data)
             elif msg_type == 'register_response':
                 logger.info(f"✅ 节点注册成功: {data.get('message', 'OK')}")
             else:
@@ -1196,6 +1390,22 @@ pollStatus();
                 
         except Exception as e:
             logger.error(f"处理远程任务失败: {e}")
+            
+    async def _handle_execute_task(self, data):
+        """处理执行任务请求（新格式）"""
+        try:
+            task_id = data.get('task_id')
+            task_info = data.get('task', {})
+            task_type = task_info.get('type')
+            payload = task_info.get('payload', {})
+            
+            logger.info(f"收到执行任务请求: {task_type} (ID: {task_id})")
+            
+            # 使用指定的 task_id 提交任务
+            await self.submit_task(task_type, payload, task_id=task_id)
+            
+        except Exception as e:
+            logger.error(f"处理执行任务失败: {e}")
 
     async def send_websocket_message(self, message: Dict[str, Any]) -> bool:
         """发送 WebSocket 消息"""

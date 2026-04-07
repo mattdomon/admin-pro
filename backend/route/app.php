@@ -44,12 +44,15 @@ Route::group('api/openclaw', function () {
     Route::get('bridge/status', 'BridgeCtrl/getBridgeStatus');    // Bridge 状态
 });
 
-// 系统监控接口 - 新增监控面板功能
+// 系统监控接口 - 完整监控面板功能
 Route::group('api/monitor', function () {
     Route::post('saveMetrics', 'MonitorCtrl/saveMetrics');       // 保存监控数据 (由 bridge.py 调用)
     Route::get('trends', 'MonitorCtrl/getTrends');               // 获取监控趋势数据
-    Route::get('overview', 'MonitorCtrl/getOverview');           // 获取系统概览
+    Route::get('overview', 'MonitorCtrl/overview');              // 系统健康概览
     Route::get('taskStats', 'MonitorCtrl/getTaskStats');         // 获取任务统计
+    Route::get('devices', 'MonitorCtrl/deviceHealth');           // 节点健康检查
+    Route::get('alert-rules', 'MonitorCtrl/alertRules');         // 告警规则
+    Route::get('check', 'MonitorCtrl/systemCheck');              // 系统健康检查
 });
 
 // OpenClaw 模型配置管理 - 直接读写 openclaw.json
@@ -163,17 +166,6 @@ Route::group('api/template', function () {
     Route::post('update/:id', 'TaskTemplateCtrl/update');            // 更新模板
     Route::delete('delete/:id', 'TaskTemplateCtrl/delete');          // 删除模板
     Route::post('use/:id', 'TaskTemplateCtrl/useTemplate');          // 使用模板
-});
-
-// ===== Sprint 2: 系统监控与告警 =====
-
-// 系统监控
-Route::group('api/monitor', function () {
-    Route::get('overview', 'MonitorCtrl/overview');                  // 系统健康概览
-    Route::get('devices', 'MonitorCtrl/deviceHealth');               // 节点健康检查
-    Route::get('reports', 'MonitorCtrl/reports');                    // 性能报表
-    Route::get('alert-rules', 'MonitorCtrl/alertRules');             // 告警规则
-    Route::get('check', 'MonitorCtrl/systemCheck');                  // 系统检查（定时任务）
 });
 
 // ===== Sprint 2: 用户权限与安全 =====

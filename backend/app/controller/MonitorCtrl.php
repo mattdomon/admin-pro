@@ -194,6 +194,109 @@ class MonitorCtrl extends BaseController
     }
     
     /**
+     * 系统健康概览（SystemMonitor.vue 使用）
+     * GET /api/monitor/overview
+     * 路由别名，指向 getOverview
+     */
+    public function overview(Request $request)
+    {
+        return $this->getOverview($request);
+    }
+
+    /**
+     * 节点健康状态
+     * GET /api/monitor/devices
+     */
+    public function deviceHealth(Request $request)
+    {
+        try {
+            // 获取所有设备及状态
+            $devices = Db::name('oc_devices')
+                ->order('last_heartbeat', 'desc')
+                ->select()
+                ->toArray();
+
+            $now = time();
+            $healthy  = [];
+            $warning  = [];
+            $critical = [];
+
+            foreach ($devices as &$device) {
+                // 离线判定：45秒未心跳
+                if ($device['status'] > 0 && $device['last_heartbeat']) {
+                    $diff = $now - $device['last_heartbeat'];
+                    if ($diff > 45) {
+                        $device['status'] = 0;
+                    }
+                }
+
+                if ($device['status'] == 1) {
+                    $healthy[] = $device;
+                } elseif ($device['status'] == 2) {
+                    $warning[] = $device;
+                } else {
+                    $critical[] = $device;
+                }
+            }
+
+            return json([
+                'code'    => 200,
+                'message' => '获取成功',
+                'data'    => compact('healthy', 'warning', 'critical')
+            ]);
+        } catch (\Exception $e) {
+            Log::error('获取设备健康状态失败: ' . $e->getMessage());
+            return json(['code' => 500, 'message' => '获取失败']);
+        }
+    }
+
+    /**
+     * 告警规则列表
+     * GET /api/monitor/alert-rules
+     */
+    public function alertRules(Request $request)
+    {
+        try {
+            $rules = Db::name('monitor_alerts')
+                ->order('id', 'asc')
+                ->select()
+                ->toArray();
+
+            return json(['code' => 200, 'message' => '获取成功', 'data' => $rules]);
+        } catch (\Exception $e) {
+            Log::error('获取告警规则失败: ' . $e->getMessage());
+            return json(['code' => 500, 'message' => '获取失败']);
+        }
+    }
+
+    /**
+     * 系统健康检查
+     * GET /api/monitor/check
+     */
+    public function systemCheck(Request $request)
+    {
+        try {
+            // 检查近5分钟的告警
+            $recentTime = time() - 300;
+            $alertHistory = Db::name('monitor_alert_history')
+                ->where('triggered_at', '>=', date('Y-m-d H:i:s', $recentTime))
+                ->count();
+
+            return json([
+                'code'    => 200,
+                'message' => '检查完成',
+                'data'    => [
+                    'alerts_count' => (int)$alertHistory,
+                    'checked_at'   => date('Y-m-d H:i:s')
+                ]
+            ]);
+        } catch (\Exception $e) {
+            Log::error('系统健康检查失败: ' . $e->getMessage());
+            return json(['code' => 500, 'message' => '检查失败']);
+        }
+    }
+
+    /**
      * 获取任务成功率统计
      * GET /api/monitor/taskStats?days=7
      */

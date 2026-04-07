@@ -183,7 +183,7 @@ class BridgeCtrl extends BaseController
             $offset = ($page - 1) * $size;
             $paginatedTasks = array_slice($tasks, $offset, $size);
             
-            return $this->success([
+            return $this->json(200, '获取成功', [
                 'tasks' => $paginatedTasks,
                 'total' => $total,
                 'page' => $page,

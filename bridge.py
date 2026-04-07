@@ -18,6 +18,28 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
 from enum import Enum
+
+
+def get_app_dir() -> Path:
+    """
+    返回应用程序的「真实工作目录」。
+
+    - PyInstaller --onefile 打包后：sys.frozen=True，程序在临时 _MEIPASS 中运行，
+      但我们需要读写可执行文件旁边的真实目录（config/、logs/、data/）。
+      => 返回 sys.executable 所在目录。
+    - 直接运行脚本时：
+      => 返回 __file__ 所在目录。
+    """
+    if getattr(sys, 'frozen', False):
+        # 打包状态：可执行文件旁边才是真实的工作目录
+        return Path(sys.executable).resolve().parent
+    else:
+        # 脚本运行状态
+        return Path(__file__).resolve().parent
+
+
+# 全局应用目录（所有相对路径都基于此）
+APP_DIR = get_app_dir()
 import websockets
 import aiohttp
 
@@ -29,12 +51,14 @@ except ImportError:
     PSUTIL_AVAILABLE = False
     logger.warning("psutil not available, system metrics collection disabled")
 
-# 配置日志
+# 配置日志（读写真实目录下的 logs/）
+_log_dir = APP_DIR / 'logs'
+_log_dir.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/bridge.log'),
+        logging.FileHandler(str(_log_dir / 'bridge.log')),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -72,8 +96,9 @@ class Task:
 class BridgeService:
     """桥梁服务主类"""
     
-    def __init__(self, config_path: str = "config/bridge.json"):
-        self.config_path = config_path
+    def __init__(self, config_path: str = None):
+        # 默认配置路径基于 APP_DIR（打包/脚本均正确）
+        self.config_path = config_path or str(APP_DIR / "config" / "bridge.json")
         self.config = self._load_config()
         self.tasks: Dict[str, Task] = {}
         self.running = False
@@ -89,9 +114,9 @@ class BridgeService:
         self.metrics_enabled = PSUTIL_AVAILABLE
         self.last_metrics = {}
         
-        # 确保必要目录存在
-        os.makedirs('logs', exist_ok=True)
-        os.makedirs('data/tasks', exist_ok=True)
+        # 确保必要目录存在（基于 APP_DIR，打包后写到可执行文件旁边）
+        (APP_DIR / 'logs').mkdir(parents=True, exist_ok=True)
+        (APP_DIR / 'data' / 'tasks').mkdir(parents=True, exist_ok=True)
         
         # ── 阶段三：SaaS 鉴权状态 ────────────────────────────────────────
         # node_key 从 bridge.json 读取；为空时代表未绑定，节点将停留在未鉴权状态
@@ -760,9 +785,9 @@ class BridgeService:
                 for task_id in tasks_to_remove:
                     del self.tasks[task_id]
                     # 删除磁盘文件
-                    task_file = f"data/tasks/{task_id}.json"
-                    if os.path.exists(task_file):
-                        os.remove(task_file)
+                    task_file = APP_DIR / 'data' / 'tasks' / f"{task_id}.json"
+                    if task_file.exists():
+                        task_file.unlink()
                 
                 if tasks_to_remove:
                     logger.info(f"清理了 {len(tasks_to_remove)} 个旧任务")
@@ -902,12 +927,15 @@ class BridgeService:
     async def _save_task(self, task: Task):
         """保存任务到磁盘"""
         try:
-            task_file = f"data/tasks/{task.id}.json"
+            task_file = APP_DIR / 'data' / 'tasks' / f"{task.id}.json"
             task_data = asdict(task)
             task_data['status'] = task.status.value  # 转换枚举为字符串
-            
-            with open(task_file, 'w', encoding='utf-8') as f:
+
+            # 原子写入：先写临时文件，成功后 rename，防止并发损坏
+            tmp_file = task_file.with_suffix('.tmp')
+            with open(tmp_file, 'w', encoding='utf-8') as f:
                 json.dump(task_data, f, ensure_ascii=False, indent=2)
+            tmp_file.replace(task_file)
         except Exception as e:
             logger.error(f"保存任务失败 {task.id}: {e}")
 

@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenClaw Bridge Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/openclaw-bridge
+ExecStart=/opt/openclaw-bridge/OpenClaw-Bridge
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

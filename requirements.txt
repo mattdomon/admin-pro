@@ -1,0 +1,15 @@
+# bridge.py 核心依赖
+# 生成时间: 2026-04-07
+# 用途: OpenClaw Bridge Service 运行时依赖
+
+# 异步 HTTP 客户端（调用 AI API、后端接口）
+aiohttp>=3.9.0
+
+# WebSocket 客户端/服务器（与 ThinkPHP 后端通信）
+websockets>=12.0
+
+# 系统资源监控（CPU/内存/磁盘 - 可选，缺少时监控功能自动禁用）
+psutil>=5.9.0
+
+# 打包工具（仅打包时使用，不需要部署到边缘节点）
+# pyinstaller>=6.0.0

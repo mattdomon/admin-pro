@@ -81,6 +81,10 @@
               <i class="el-icon-s-operation"></i>
               <span>任务管理</span>
             </template>
+            <el-menu-item index="/task/dispatch">
+              <i class="el-icon-s-promotion"></i>
+              <span slot="title">任务下发</span>
+            </el-menu-item>
             <el-menu-item index="/scripts">
               <i class="el-icon-tickets"></i>
               <span slot="title">脚本管理</span>
@@ -113,9 +117,13 @@
               <i class="el-icon-setting"></i>
               <span>系统管理</span>
             </template>
-            <el-menu-item index="/device">
+            <el-menu-item index="/nodes">
               <i class="el-icon-s-grid"></i>
               <span slot="title">节点管理</span>
+            </el-menu-item>
+            <el-menu-item index="/device">
+              <i class="el-icon-mobile-phone"></i>
+              <span slot="title">设备管理</span>
             </el-menu-item>
             <el-menu-item index="/monitor">
               <i class="el-icon-warning-outline"></i>

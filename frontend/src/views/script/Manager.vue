@@ -67,6 +67,27 @@
                 :loading="saving"
                 @click="saveScript"
               >保存</el-button>
+              
+              <!-- 新增：目标节点选择 -->
+              <el-select 
+                v-if="!isNew"
+                v-model="targetNodeKey"
+                placeholder="选择执行节点"
+                size="small"
+                style="width: 200px; margin-right: 8px;"
+                :disabled="!onlineNodes.length"
+              >
+                <el-option
+                  v-for="node in onlineNodes"
+                  :key="node.id"
+                  :label="node.node_name || `节点-${node.node_key_masked.slice(-4)}`"
+                  :value="node.node_key_masked"
+                >
+                  <span style="float: left">{{ node.node_name || '未命名' }}</span>
+                  <span style="float: right; color: #8492a6; font-size: 12px;">{{ node.node_key_masked }}</span>
+                </el-option>
+              </el-select>
+              
               <el-button
                 v-if="!isNew"
                 type="primary"
@@ -74,6 +95,7 @@
                 icon="el-icon-video-play"
                 :loading="executing"
                 @click="executeScript"
+                :disabled="!targetNodeKey && onlineNodes.length > 0"
               >执行脚本</el-button>
               <el-button
                 size="small"
@@ -257,6 +279,7 @@
 
 <script>
 import { getScriptList, getScript, saveScript, deleteScript, getScriptTemplates } from '@/api/script'
+import { mapGetters } from 'vuex'
 
 export default {
   name: 'ScriptManager',
@@ -273,6 +296,9 @@ export default {
       isNew: false,
       editingName: '',
       editingContent: '',
+      
+      // 新增：目标节点选择
+      targetNodeKey: '', // 选中的节点key（脱敏格式）
 
       // 语法检查（本地简单检测）
       syntaxError: null,
@@ -295,6 +321,8 @@ export default {
   },
 
   computed: {
+    ...mapGetters('nodes', ['onlineNodes']), // 获取在线节点列表
+    
     lineCount() {
       return (this.editingContent.match(/\n/g) || []).length + 1
     },
@@ -450,16 +478,28 @@ export default {
         this.$message.error('必须先保存为 .py 文件')
         return
       }
+      
+      if (this.onlineNodes.length > 0 && !this.targetNodeKey) {
+        this.$message.error('请选择目标执行节点')
+        return
+      }
 
       this.executing = true
       try {
-        const res = await this.$axios.post('/api/openclaw/bridge/task', {
+        const payload = {
           type: 'script',
           payload: {
             script_path: this.editingName,
             args: []
           }
-        })
+        }
+        
+        // 如果有选中的节点，添加target_node_key
+        if (this.targetNodeKey) {
+          payload.target_node_key = this.targetNodeKey
+        }
+        
+        const res = await this.$axios.post('/api/openclaw/bridge/task', payload)
 
         if (res.data.code === 200) {
           this.$message.success(`脚本已下发执行，任务ID: ${res.data.task_id}`)

@@ -1,7 +1,7 @@
 # PROGRESS.md - Admin Pro 开发进度
 
-> **项目状态**: 🎉 Release v1.0 已完成，全链路实时调度系统投产就绪  
-> **最后更新**: 2026-04-07 09:03 by HC Coding  
+> **项目状态**: 🚀 Release v1.1 开发中，节点管理 + 任务调度扩展  
+> **最后更新**: 2026-04-07 18:04 by HC Coding  
 > **GitHub**: https://github.com/mattdomon/admin-pro
 
 ---
@@ -111,6 +111,31 @@
 4. 结果生成和保存
 5. 状态更新和通知
 6. 清理和完成
+
+---
+
+## 🆕 Release v1.1 新增功能 (2026-04-07)
+
+### 🖥️ 节点管理系统
+- [x] **节点列表页** - `frontend/src/views/nodes/Index.vue` 节点状态总览
+- [x] **节点详情页** - `frontend/src/views/nodes/Detail.vue` 单节点监控
+- [x] **任务调度器** - `frontend/src/views/nodes/Dispatcher.vue` 调度逻辑界面
+- [x] **调度逻辑层** - `frontend/src/views/nodes/DispatcherLogic.js` 调度算法
+- [x] **添加节点弹窗** - `frontend/src/views/nodes/components/AddNodeDialog.vue`
+- [x] **近期任务组件** - `frontend/src/views/nodes/components/RecentTasks.vue`
+- [x] **Nodes Store** - `frontend/src/store/modules/nodes.js` 状态管理强化
+- [x] **路由注册** - `frontend/src/router/index.js` 新增节点路由
+
+### 🐍 脚本层增强
+- [x] **mock_bridge.py** - 模拟调度器，用于开发调试
+- [x] **test_concurrent_task.py** - 并发任务压测脚本
+
+### 🔧 后端优化
+- [x] **BaseController.php** - 基础控制器能力增强
+- [x] **BridgeCtrl.php** - 任务调度接口扩展
+- [x] **LogService.php** - 日志服务修复
+- [x] **Manager.vue** - 脚本管理界面功能增强
+- [x] **Home.vue** - 首页仪表盘更新
 
 ---
 

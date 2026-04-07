@@ -28,6 +28,8 @@ const routes = [
       { path: '/ai/chat', name: 'AIChat', component: () => import('@/views/ai/Chat.vue') },
       
       // 任务管理
+      { path: '/task/dispatch', name: 'TaskDispatcher', component: () => import('@/views/task/Dispatcher.vue') },
+      { path: '/tasks/:taskId', name: 'TaskDetail', component: () => import('@/views/task/Detail.vue') },
       { path: '/scripts', name: 'ScriptManager', component: () => import('@/views/script/Manager.vue') },
       { path: '/batch', name: 'BatchTaskManager', component: () => import('@/views/batch/TaskManager.vue') },
       { path: '/terminal', name: 'LogConsole', component: () => import('@/views/terminal/LogConsole.vue') },
@@ -40,7 +42,10 @@ const routes = [
 
       // 系统管理
       { path: '/device', name: 'DeviceIndex', component: () => import('@/views/device/Index.vue') },
-      { path: '/monitor', name: 'SystemMonitor', component: () => import('@/views/monitor/SystemMonitor.vue') }
+      { path: '/monitor', name: 'SystemMonitor', component: () => import('@/views/monitor/SystemMonitor.vue') },
+      
+      // 节点管理
+      { path: '/nodes', name: 'NodesIndex', component: () => import('@/views/nodes/Index.vue') }
     ]
   }
 ]

@@ -52,13 +52,30 @@ class BridgeCtrl extends BaseController
             // ── SaaS 靶向路由逻辑 ──────────────────────────────────
             // 如果指定了 target_node_key，通过 Gateway 精准投递给对应节点
             if (!empty($targetNodeKey)) {
-                // 验证节点存在且在线
-                $nodeRecord = NodeKey::where('node_key', $targetNodeKey)
-                                     ->where('status', NodeKey::STATUS_ONLINE)
-                                     ->find();
+                // 支持脱敏key查找：如果是脱敏格式（包含****），通过后缀匹配
+                $nodeRecord = null;
+                if (strpos($targetNodeKey, '****') !== false) {
+                    // 脱敏key格式：前8位+****+后4位
+                    $suffix = substr($targetNodeKey, -4);
+                    $prefix = substr($targetNodeKey, 0, 8);
+                    $nodeRecord = NodeKey::where('user_id', $this->getUserId())
+                                         ->where('status', NodeKey::STATUS_ONLINE)
+                                         ->where('node_key', 'like', $prefix . '%' . $suffix)
+                                         ->find();
+                } else {
+                    // 完整key格式
+                    $nodeRecord = NodeKey::where('node_key', $targetNodeKey)
+                                         ->where('user_id', $this->getUserId())
+                                         ->where('status', NodeKey::STATUS_ONLINE)
+                                         ->find();
+                }
+                
                 if (!$nodeRecord) {
                     return $this->json(400, '目标节点不在线或不存在: ' . substr($targetNodeKey, 0, 8) . '...');
                 }
+                
+                // 使用完整的node_key进行通信
+                $actualNodeKey = $nodeRecord->node_key;
 
                 $taskId = $type . '_' . date('Ymd_His') . '_' . substr(uniqid(), -6);
 
@@ -67,7 +84,7 @@ class BridgeCtrl extends BaseController
                     'task_id'         => $taskId,
                     'task_type'       => $type,
                     'payload'         => $payload,
-                    'target_node_key' => $targetNodeKey,
+                    'target_node_key' => $actualNodeKey, // 使用完整key
                     'dispatched_at'   => time(),
                 ], JSON_UNESCAPED_UNICODE);
 
@@ -75,11 +92,11 @@ class BridgeCtrl extends BaseController
                 Gateway::$registerAddress = config('worker_server.register_address', '127.0.0.1:1236');
 
                 // 靶向推送：只发给 node_key 对应的那一个连接
-                Gateway::sendToUid($targetNodeKey, $taskMessage);
+                Gateway::sendToUid($actualNodeKey, $taskMessage);
 
                 return $this->json(200, '任务已下发到节点 ' . $nodeRecord->node_name, [
                     'task_id'         => $taskId,
-                    'target_node_key' => $targetNodeKey,
+                    'target_node_key' => $actualNodeKey,
                     'target_node_name'=> $nodeRecord->node_name,
                 ]);
             }

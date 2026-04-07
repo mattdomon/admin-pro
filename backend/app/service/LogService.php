@@ -48,7 +48,7 @@ class LogService
     /**
      * 记录错误日志
      */
-    public static function error(string $module, string $message, \Throwable $exception = null): void
+    public static function error(string $module, string $message, ?\Throwable $exception = null): void
     {
         $context = [
             'exception' => $exception ? [

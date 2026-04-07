@@ -66,4 +66,24 @@ abstract class BaseController
     {
         return input($name, $default);
     }
+    
+    /**
+     * 获取当前登录用户ID
+     */
+    protected function getUserId(): ?int
+    {
+        $token = trim((string) $this->input('token', ''));
+        if (empty($token)) {
+            // 从 Header 获取 Authorization Bearer
+            $auth = $this->request->header('Authorization', '');
+            if (preg_match('/Bearer\s+(\S+)/', $auth, $matches)) {
+                $token = $matches[1];
+            }
+        }
+        
+        if (empty($token)) return null;
+        
+        $info = cache("token:{$token}");
+        return is_array($info) ? (int)$info['user_id'] : null;
+    }
 }

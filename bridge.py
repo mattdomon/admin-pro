@@ -93,6 +93,13 @@ class BridgeService:
         os.makedirs('logs', exist_ok=True)
         os.makedirs('data/tasks', exist_ok=True)
         
+        # ── 阶段三：SaaS 鉴权状态 ────────────────────────────────────────
+        # node_key 从 bridge.json 读取；为空时代表未绑定，节点将停留在未鉴权状态
+        self.node_key: str = self.config.get("node_key", "")
+        # 标识当前是否需要热重载（写入新 key 后置 True，_connect_websocket 检测后重连）
+        self._reload_flag: bool = False
+        # ────────────────────────────────────────────────────────────────
+
         logger.info(f"Bridge Service 初始化完成 - Node ID: {self.node_id}")
         if not self.metrics_enabled:
             logger.warning("系统监控功能已禁用 - 请安装 psutil: pip install psutil")
@@ -137,7 +144,8 @@ class BridgeService:
             self._start_status_monitor(),
             self._start_cleanup_worker(),
             self._start_websocket_client(),  # WebSocket 客户端
-            self._collect_system_metrics()   # 系统监控采集器
+            self._collect_system_metrics(),  # 系统监控采集器
+            self._start_local_ui(),          # 阶段三：本地 WebUI (8888)
         )
 
     async def stop(self):
@@ -686,68 +694,88 @@ class BridgeService:
                 await asyncio.sleep(5)  # 等待5秒后重试
 
     async def _connect_websocket(self):
-        """建立 WebSocket 连接并维持"""
-        gateway_url = self.config['openclaw']['gateway_url']
-        
-        # 指数退避重连机制
-        max_backoff = 300  # 最大5分钟
-        base_delay = 1
-        
+        """建立 WebSocket 连接并维持
+
+        SaaS 阶段三改造要点：
+          1. 连接成功后立刻发送 node_key 鉴权包（原来的 register 消息已替换）
+          2. 检测 _reload_flag，为 True 时主动断开并用新 key 重连
+          3. node_key 为空时不连接，轮询等待用户登录
+        """
+        gateway_url = self.config.get('cloud_gateway',
+                       self.config.get('openclaw', {}).get('gateway_url', 'ws://localhost:8282'))
+
+        max_backoff = 300
+        base_delay  = 1
+
         while self.running:
+
+            # ── 未配置 node_key：轮询等待登录 ─────────────────────
+            if not self.node_key:
+                logger.info("⏳ node_key 未配置，等待本地登录... (访问 http://localhost:8888)")
+                await asyncio.sleep(3)
+                # 尝试从文件重读（用户可能在等待期间完成登录）
+                self._reload_config_from_file()
+                continue
+
             try:
-                logger.info(f"正在连接到 WebSocket 网关: {gateway_url}")
-                
+                logger.info(f"正在连接到云端网关: {gateway_url}")
+
                 async with websockets.connect(
                     gateway_url,
-                    ping_interval=20,  # 20秒 ping 间隔
-                    ping_timeout=10,   # 10秒 ping 超时
-                    close_timeout=10   # 10秒关闭超时
+                    ping_interval=20,
+                    ping_timeout=10,
+                    close_timeout=10
                 ) as websocket:
-                    self.ws_client = websocket
-                    self.ws_connected = True
-                    self.ws_reconnect_attempts = 0
-                    
-                    logger.info("✅ WebSocket 连接成功!")
-                    
-                    # 立即发送节点注册消息
-                    await self._register_node(websocket)
-                    
-                    # 启动心跳保活任务
+                    self.ws_client              = websocket
+                    self.ws_connected           = True
+                    self.ws_reconnect_attempts  = 0
+
+                    # ── 鉴权包：首个报文必须是 auth ───────────────
+                    await websocket.send(json.dumps({
+                        "type":     "auth",
+                        "node_key": self.node_key,
+                    }))
+                    logger.info(f"🔑 已发送鉴权包 node_key=...{self.node_key[-4:]}")
+
+                    # 启动心跳任务
                     heartbeat_task = asyncio.create_task(
                         self._websocket_heartbeat(websocket)
                     )
-                    
+
                     try:
-                        # 监听消息
                         async for message in websocket:
+                            # ── 热重载：写入新 key 后主动断开 ─────────
+                            if self._reload_flag:
+                                self._reload_flag = False
+                                self._reload_config_from_file()
+                                logger.info("🔄 热重载：断开旧连接，将用新 node_key 重连")
+                                break  # 跳出内层循环，重连
                             await self._handle_websocket_message(message)
+
                     except websockets.exceptions.ConnectionClosed:
                         logger.warning("WebSocket 连接已关闭")
                     finally:
                         heartbeat_task.cancel()
                         self.ws_connected = False
-                        self.ws_client = None
-                        
+                        self.ws_client    = None
+
             except Exception as e:
-                self.ws_connected = False
-                self.ws_client = None
+                self.ws_connected          = False
+                self.ws_client             = None
                 self.ws_reconnect_attempts += 1
-                
-                # 计算退避延迟
-                delay = min(base_delay * (2 ** self.ws_reconnect_attempts), max_backoff)
-                # 添加随机抖动防止雷群效应
-                jitter = random.uniform(0.5, 1.5)
+
+                delay       = min(base_delay * (2 ** self.ws_reconnect_attempts), max_backoff)
+                jitter      = random.uniform(0.5, 1.5)
                 actual_delay = delay * jitter
-                
+
                 logger.warning(
                     f"WebSocket 连接失败 (第{self.ws_reconnect_attempts}次): {e}. "
                     f"{actual_delay:.1f}秒后重试"
                 )
-                
                 await asyncio.sleep(actual_delay)
                 
     async def _register_node(self, websocket):
-        """向服务器注册节点"""
+        """向服务器注册节点（保留兼容旧逻辑）"""
         register_msg = {
             "type": "register",
             "node_id": self.node_id,
@@ -755,9 +783,305 @@ class BridgeService:
             "version": "1.0",
             "capabilities": ["task_processing", "script_execution"]
         }
-        
         await websocket.send(json.dumps(register_msg))
         logger.info(f"✨ 已发送节点注册: {self.node_id}")
+
+    # ═══════════════════════════════════════════════════════════════
+    # 阶段三：SaaS 核心协程
+    # ═══════════════════════════════════════════════════════════════
+
+    def _reload_config_from_file(self):
+        """从 bridge.json 热重载配置（不重启进程）"""
+        try:
+            with open(self.config_path, 'r', encoding='utf-8') as f:
+                new_cfg = json.load(f)
+            self.config   = new_cfg
+            self.node_key = new_cfg.get('node_key', '')
+            logger.info(f"🔄 配置已热重载，node_key=...{self.node_key[-4:] if self.node_key else '(空)'}")
+        except Exception as e:
+            logger.error(f"热重载配置失败: {e}")
+
+    async def _cloud_login_and_get_key(self, username: str, password: str, node_name: str) -> dict:
+        """
+        代理登录云端并获取 node_key，全程三步：
+          1. POST /api/auth/login        → 拿 Token
+          2. POST /api/nodes/generate    → 拿 node_key
+          3. 原子写入 config/bridge.json → 触发热重载
+
+        成功返回: {'ok': True, 'node_key': '...', 'node_name': '...'}
+        失败返回: {'ok': False, 'error': '...'}
+        """
+        cloud_base = self.config.get('cloud_base_url', 'http://localhost:8000')
+
+        try:
+            async with aiohttp.ClientSession() as session:
+
+                # ── Step 1: 登录 ──────────────────────────────────────
+                async with session.post(
+                    f'{cloud_base}/api/auth/login',
+                    json={'username': username, 'password': password},
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    body = await resp.json()
+                    if body.get('code') != 200:
+                        return {'ok': False, 'error': body.get('message', '登录失败')}
+
+                    token = body['data']['token']
+                    user  = body['data']['user']
+                    logger.info(f"✅ 云端登录成功: user_id={user['id']}, username={user['username']}")
+
+                # ── Step 2: 生成 node_key ─────────────────────────────
+                async with session.post(
+                    f'{cloud_base}/api/nodes/generate',
+                    json={'node_name': node_name or f'bridge-{self.node_id[-6:]}'},
+                    headers={'Authorization': f'Bearer {token}'},
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    body = await resp.json()
+                    if body.get('code') != 200:
+                        return {'ok': False, 'error': body.get('message', '获取 node_key 失败')}
+
+                    node_key  = body['data']['node_key']
+                    node_name = body['data']['node_name']
+                    logger.info(f"✅ node_key 已获取: ...{node_key[-4:]} ({node_name})")
+
+            # ── Step 3: 原子写入 bridge.json ──────────────────────────
+            new_cfg = dict(self.config)  # 浅拷贝，保留旧字段
+            new_cfg['node_key']       = node_key
+            new_cfg['node_name']      = node_name
+            new_cfg['cloud_base_url'] = cloud_base
+            # 从 cloud_base_url 推导 cloud_gateway WS 地址
+            # http://host:8000  →  ws://host:8282
+            # https://host      →  wss://host:8282
+            import re as _re
+            _m = _re.match(r'(https?)://([^:/]+)', cloud_base)
+            if _m:
+                _scheme = 'wss' if _m.group(1) == 'https' else 'ws'
+                _host   = _m.group(2)
+                _derived_gw = f'{_scheme}://{_host}:8282'
+            else:
+                _derived_gw = 'ws://localhost:8282'
+
+            new_cfg['cloud_gateway'] = self.config.get('cloud_gateway', _derived_gw)
+
+            tmp_path = self.config_path + '.tmp'
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                json.dump(new_cfg, f, indent=2, ensure_ascii=False)
+            os.replace(tmp_path, self.config_path)  # 原子替换，防损坏
+
+            logger.info(f"💾 bridge.json 已写入，触发热重载")
+
+            # ── Step 4: 设置热重载标志，_connect_websocket 检测到后断开重连 ──
+            self._reload_flag = True
+
+            return {'ok': True, 'node_key': node_key, 'node_name': node_name}
+
+        except aiohttp.ClientConnectorError:
+            return {'ok': False, 'error': f'无法连接云端: {cloud_base}，请检查地址'}
+        except asyncio.TimeoutError:
+            return {'ok': False, 'error': '云端请求超时，请稍后重试'}
+        except Exception as e:
+            logger.error(f"_cloud_login_and_get_key 异常: {e}")
+            return {'ok': False, 'error': str(e)}
+
+    async def _start_local_ui(self):
+        """
+        本地 WebUI 服务（8888 端口）
+
+        路由：
+          GET  /              — 登录/状态页面（纯 HTML，无文件挂载）
+          POST /api/local/login  — 代理云端登录，写 node_key，触发热重载
+          GET  /api/local/status — 返回 WS 连接状态，供前端轮询
+        """
+        from aiohttp import web
+
+        # ── HTML 模板（内联，无需静态文件） ───────────────────────────
+        HTML = """\
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bridge 本地配置面板</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+       background:#0f172a;color:#e2e8f0;min-height:100vh;
+       display:flex;align-items:center;justify-content:center}
+  .card{background:#1e293b;border-radius:12px;padding:36px 40px;
+        width:400px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+  h1{font-size:1.3rem;font-weight:700;margin-bottom:4px;color:#f8fafc}
+  .sub{font-size:.85rem;color:#94a3b8;margin-bottom:28px}
+  label{display:block;font-size:.8rem;color:#94a3b8;margin-bottom:6px}
+  input{width:100%;padding:10px 14px;background:#0f172a;border:1px solid #334155;
+        border-radius:8px;color:#e2e8f0;font-size:.95rem;outline:none}
+  input:focus{border-color:#6366f1}
+  .field{margin-bottom:16px}
+  button{width:100%;padding:12px;background:#6366f1;color:#fff;
+         border:none;border-radius:8px;font-size:1rem;
+         font-weight:600;cursor:pointer;margin-top:8px;transition:.2s}
+  button:hover{background:#4f46e5}
+  button:disabled{background:#334155;cursor:not-allowed}
+  .status{margin-top:20px;padding:12px;border-radius:8px;
+          font-size:.85rem;display:none}
+  .status.ok {background:#064e3b;color:#6ee7b7;border:1px solid #065f46}
+  .status.err{background:#450a0a;color:#fca5a5;border:1px solid #7f1d1d}
+  .status.inf{background:#1e3a5f;color:#93c5fd;border:1px solid #1e40af}
+  .badge{display:inline-block;padding:3px 10px;border-radius:99px;
+         font-size:.75rem;font-weight:600}
+  .badge.online {background:#065f46;color:#6ee7b7}
+  .badge.offline{background:#7f1d1d;color:#fca5a5}
+  .badge.pending{background:#713f12;color:#fcd34d}
+  .ws-bar{margin-top:24px;padding:14px;background:#0f172a;
+          border-radius:8px;font-size:.82rem;color:#94a3b8}
+  .ws-bar .row{display:flex;justify-content:space-between;margin-bottom:6px}
+  .ws-bar .row:last-child{margin-bottom:0}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🔗 Bridge 本地配置面板</h1>
+  <p class="sub">输入云端账号，完成节点绑定</p>
+
+  <div class="field">
+    <label>云端地址</label>
+    <input id="baseUrl" type="text" value="http://localhost:8000" placeholder="http://your-cloud.com">
+  </div>
+  <div class="field">
+    <label>账号</label>
+    <input id="username" type="text" placeholder="admin">
+  </div>
+  <div class="field">
+    <label>密码</label>
+    <input id="password" type="password" placeholder="••••••••">
+  </div>
+  <div class="field">
+    <label>节点备注名</label>
+    <input id="nodeName" type="text" placeholder="我的本地服务器">
+  </div>
+  <button id="btn" onclick="doLogin()">绑定到云端</button>
+  <div class="status" id="msg"></div>
+
+  <div class="ws-bar" id="wsBar">
+    <div class="row"><span>连接状态</span><span id="wsStatus">—</span></div>
+    <div class="row"><span>节点 Key</span><span id="wsKey">—</span></div>
+    <div class="row"><span>云端</span><span id="wsCloud">—</span></div>
+  </div>
+</div>
+
+<script>
+async function doLogin(){
+  const btn=document.getElementById('btn');
+  const msg=document.getElementById('msg');
+  btn.disabled=true; btn.textContent='绑定中...';
+  msg.style.display='none';
+  const body={
+    base_url: document.getElementById('baseUrl').value.trim(),
+    username: document.getElementById('username').value.trim(),
+    password: document.getElementById('password').value,
+    node_name:document.getElementById('nodeName').value.trim()
+  };
+  try{
+    const r=await fetch('/api/local/login',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)
+    });
+    const d=await r.json();
+    if(d.ok){
+      show(msg,'ok','✅ 绑定成功！节点 Key: ...'+d.node_key.slice(-4)+'  正在重连云端...');
+    }else{
+      show(msg,'err','❌ '+d.error);
+    }
+  }catch(e){
+    show(msg,'err','❌ 请求失败: '+e.message);
+  }
+  btn.disabled=false; btn.textContent='绑定到云端';
+}
+
+function show(el,cls,text){
+  el.className='status '+cls;
+  el.textContent=text;
+  el.style.display='block';
+}
+
+async function pollStatus(){
+  try{
+    const r=await fetch('/api/local/status');
+    const d=await r.json();
+    const badge=(d.ws_connected)?
+      '<span class="badge online">● 在线</span>':
+      '<span class="badge offline">● 离线</span>';
+    document.getElementById('wsStatus').innerHTML=badge;
+    document.getElementById('wsKey').textContent=d.node_key_suffix||'(未绑定)';
+    document.getElementById('wsCloud').textContent=d.cloud_status||'—';
+
+    // 断连时显示红幅警告
+    const bar=document.getElementById('wsBar');
+    bar.style.border=d.ws_connected?'1px solid #1e40af':'2px solid #dc2626';
+  }catch(_){}
+  setTimeout(pollStatus,3000);
+}
+pollStatus();
+</script>
+</body></html>
+"""
+
+        async def handle_index(request):
+            return web.Response(text=HTML, content_type='text/html')
+
+        async def handle_login(request):
+            """代理登录云端，写入 bridge.json，触发热重载"""
+            try:
+                data      = await request.json()
+                base_url  = data.get('base_url', '').rstrip('/')
+                username  = data.get('username', '')
+                password  = data.get('password', '')
+                node_name = data.get('node_name', '')
+
+                if not all([base_url, username, password]):
+                    return web.json_response({'ok': False, 'error': '地址/账号/密码不能为空'})
+
+                # 临时更新 cloud_base_url，让 _cloud_login_and_get_key 使用
+                self.config['cloud_base_url'] = base_url
+
+                result = await self._cloud_login_and_get_key(username, password, node_name)
+                return web.json_response(result)
+
+            except Exception as e:
+                return web.json_response({'ok': False, 'error': str(e)})
+
+        async def handle_status(request):
+            """返回实时连接状态（供本地页面轮询）"""
+            suffix = ''
+            if self.node_key:
+                suffix = '...' + self.node_key[-4:]  # 只展示后4位
+
+            cloud_url = self.config.get('cloud_base_url', '')
+            return web.json_response({
+                'ws_connected':    self.ws_connected,
+                'node_key_suffix': suffix,
+                'cloud_status':    'online' if self.ws_connected else 'offline',
+                'cloud_url':       cloud_url,
+                'uptime_s':        int(time.time() - self._start_time) if hasattr(self, '_start_time') else 0,
+            })
+
+        # ── 启动 Web 服务器 ───────────────────────────────────────────
+        app = web.Application()
+        app.router.add_get('/',                 handle_index)
+        app.router.add_post('/api/local/login', handle_login)
+        app.router.add_get('/api/local/status', handle_status)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', 8888)
+        await site.start()
+
+        self._start_time = time.time()
+        logger.info("🌐 本地 WebUI 已启动: http://localhost:8888")
+
+        # 保持协程存活
+        while self.running:
+            await asyncio.sleep(1)
         
     async def _websocket_heartbeat(self, websocket):
         """心跳保活任务"""
@@ -1010,23 +1334,21 @@ class BridgeAPI:
 # 主程序入口
 async def main():
     """主程序"""
-    # 信号处理
     bridge = BridgeService()
-    api = BridgeAPI(bridge)
-    
+
     def signal_handler(signum, frame):
         logger.info(f"收到信号 {signum}，正在优雅停止...")
         asyncio.create_task(bridge.stop())
-    
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     try:
-        # 启动服务
-        await asyncio.gather(
-            bridge.start(),
-            api.start_server()
-        )
+        # bridge.start() 内部已包含：
+        #   _start_task_processor / _start_status_monitor / _start_cleanup_worker
+        #   _start_websocket_client / _collect_system_metrics
+        #   _start_local_ui  (8888 端口，阶段三新增)
+        await bridge.start()
     except KeyboardInterrupt:
         logger.info("收到中断信号，正在停止服务...")
     finally:

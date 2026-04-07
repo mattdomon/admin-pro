@@ -90,7 +90,10 @@
             </div>
             <div class="message-content">
               <div class="message-text" v-html="formatMessage(msg.content)"></div>
-              <div class="message-time">{{ msg.time }}</div>
+              <div class="message-time">
+                {{ msg.time }}
+                <el-tag v-if="msg.node" size="mini" type="success" style="margin-left:6px;">{{ msg.node }}</el-tag>
+              </div>
             </div>
           </div>
           
@@ -270,8 +273,6 @@ export default {
       // Shift+Enter 的默认行为是换行
     },
     async sendToAI(userMessage) {
-      const model = this.models.find(m => m.id === this.selectedModelId)
-      
       if (!model) {
         this.$message.error('未找到选择的模型')
         return
@@ -289,11 +290,90 @@ export default {
       // 附加节点信息
       const nodeId = this.selectedNodeId || null
       
-      if (this.streamMode) {
-        await this.streamChat(model, messages, nodeId)
+      if (nodeId) {
+        // 节点模式：异步任务，轮询结果
+        await this.nodeChat(model, messages, nodeId)
+      } else if (this.streamMode) {
+        await this.streamChat(model, messages, null)
       } else {
-        await this.normalChat(model, messages, nodeId)
+        await this.normalChat(model, messages, null)
       }
+    },
+    async nodeChat(model, messages, nodeId) {
+      try {
+        this.streamingText = '⏳ 正在下发任务到节点...'
+        const token = localStorage.getItem('token')
+        
+        const res = await fetch('/api/ai/chat', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': token ? `Bearer ${token}` : ''
+          },
+          body: JSON.stringify({
+            model_path: model.modelPath || `${model.provider}/${model.modelId}`,
+            messages,
+            stream: false,
+            node_id: nodeId
+          })
+        })
+        
+        const data = await res.json()
+        
+        if (data.code !== 200) {
+          throw new Error(data.message || '任务下发失败')
+        }
+        
+        const taskId = data.data?.task_id
+        if (!taskId) {
+          throw new Error('未获取到 task_id')
+        }
+        
+        this.streamingText = `⏳ 任务已下发 (${data.data.node_name})，等待节点响应...`
+        
+        // 轮询任务结果（最多60秒）
+        const result = await this.pollTaskResult(taskId, 60)
+        
+        this.messages.push({
+          role: 'assistant',
+          content: result,
+          time: this.formatTime(new Date()),
+          node: data.data.node_name
+        })
+        
+      } catch (e) {
+        this.$message.error('节点执行失败: ' + e.message)
+      } finally {
+        this.streaming = false
+        this.streamingText = ''
+        this.scrollToBottom()
+      }
+    },
+    async pollTaskResult(taskId, timeoutSec) {
+      const start = Date.now()
+      const token = localStorage.getItem('token')
+      
+      while (Date.now() - start < timeoutSec * 1000) {
+        await new Promise(r => setTimeout(r, 2000))
+        
+        try {
+          const res = await fetch(`/api/openclaw/bridge/tasks?task_id=${taskId}`, {
+            headers: { 'Authorization': token ? `Bearer ${token}` : '' }
+          })
+          const data = await res.json()
+          const task = data.data?.tasks?.find(t => t.id === taskId) || data.data
+          
+          if (task?.status === 'success') {
+            return task.result?.content || JSON.stringify(task.result)
+          } else if (task?.status === 'failed' || task?.status === 'timeout') {
+            throw new Error(task.error || '节点执行失败')
+          }
+        } catch (e) {
+          if (e.message !== '节点执行失败') console.warn('轮询异常:', e)
+          else throw e
+        }
+      }
+      throw new Error('节点响应超时（60s）')
     },
     async streamChat(model, messages, nodeId = null) {
       this.currentController = new AbortController()

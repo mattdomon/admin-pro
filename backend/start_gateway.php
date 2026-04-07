@@ -24,7 +24,7 @@ $businessConfig = $workerConfig['business_worker'] ?? [];
 $registerAddress = $workerConfig['register_address'] ?? '127.0.0.1:1236';
 
 // Register
-$register = new \GatewayWorker\Register();
+$register = new \GatewayWorker\Register('text://127.0.0.1:1236');
 $register->name = 'OpenClawRegister';
 
 // Gateway

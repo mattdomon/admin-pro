@@ -29,6 +29,7 @@ class Chat extends BaseController
             $modelId = $body['model_id'] ?? null;
             $modelPath = $body['model_path'] ?? null;
             $stream = (bool)($body['stream'] ?? false);
+            $nodeId = $body['node_id'] ?? null;  // 节点ID，空则本地执行
             
             // 获取模型配置
             $modelConfig = null;
@@ -46,7 +47,12 @@ class Chat extends BaseController
                 return $this->error('未找到模型配置');
             }
             
-            $baseUrl = rtrim($modelConfig['baseUrl'] ?? '', '/');
+            // ── 节点执行模式：把任务下发给节点 bridge.py ──
+            if ($nodeId) {
+                return $this->dispatchToNode($nodeId, $modelConfig, $messages);
+            }
+            
+            // ── 本地执行模式 ──
             $apiKey = $modelConfig['apiKey'] ?? '';
             $apiType = $modelConfig['api'] ?? 'openai-completions';
             $modelIdentifier = $modelConfig['modelId'] ?? ($modelConfig['name'] ?? '');
@@ -65,6 +71,49 @@ class Chat extends BaseController
         } catch (\Exception $e) {
             return $this->error('对话失败: ' . $e->getMessage());
         }
+    }
+    
+    /**
+     * 把 AI 任务下发到指定节点
+     */
+    private function dispatchToNode(int $nodeId, array $modelConfig, array $messages)
+    {
+        // 查节点
+        $node = \app\model\NodeKey::find($nodeId);
+        if (!$node || $node->status !== 'online') {
+            return $this->error('节点不存在或已离线');
+        }
+        
+        // 构造任务 payload（包含模型凭证）
+        $taskId = 'ai_' . uniqid();
+        $taskPayload = [
+            'type'    => 'execute_task',
+            'task_id' => $taskId,
+            'task'    => [
+                'type'    => 'ai',
+                'payload' => [
+                    'model_path' => $modelConfig['provider'] . '/' . $modelConfig['modelId'],
+                    'messages'   => $messages,
+                    'base_url'   => $modelConfig['baseUrl'],
+                    'api_key'    => $modelConfig['apiKey'],
+                    'api_type'   => $modelConfig['api'] ?? 'openai',
+                ],
+            ],
+        ];
+        
+        // 通过 GatewayWorker 推送任务给节点
+        \GatewayWorker\Lib\Gateway::$registerAddress = config('worker_server.register_address', '127.0.0.1:1236');
+        \GatewayWorker\Lib\Gateway::sendToUid($node->node_key, json_encode($taskPayload));
+        
+        return json([
+            'code'    => 200,
+            'message' => '任务已下发到节点',
+            'data'    => [
+                'task_id'   => $taskId,
+                'node_name' => $node->node_name,
+                'mode'      => 'node',
+            ]
+        ]);
     }
     
     /**

@@ -48,7 +48,7 @@
     "agents_path": "~/.openclaw/agents"
   },
   "cloud_base_url": "http://localhost:8000",
-  "node_key": "4de1b8c0fcef7ff00c28a7b05449ddb1",
-  "node_name": "测试节点-阶段三",
-  "cloud_gateway": "ws://localhost:8000:8282"
+  "node_key": "2eec63a1381aea334b9e6295dc86cb87",
+  "node_name": "cesssss",
+  "cloud_gateway": "ws://localhost:8282"
 }

@@ -145,7 +145,7 @@ class BridgeService:
             self._start_cleanup_worker(),
             self._start_websocket_client(),  # WebSocket 客户端
             self._collect_system_metrics(),  # 系统监控采集器
-            self._start_local_ui(),          # 阶段三：本地 WebUI (8888)
+            self._start_local_ui(),          # 阶段三：本地 WebUI (8890)
         )
 
     async def stop(self):
@@ -323,16 +323,54 @@ class BridgeService:
             raise ValueError(f"未知OpenClaw操作: {action}")
 
     async def _process_ai_task(self, task: Task) -> Dict[str, Any]:
-        """处理AI任务"""
+        """处理AI任务，调用AI API"""
         payload = task.payload
-        model = payload.get('model', 'claude-3-5-haiku-latest')
-        
-        # 这里集成各种AI服务
-        # 示例：调用Claude API
+        model_path = payload.get('model_path', '')
+        messages   = payload.get('messages', [])
+        base_url   = payload.get('base_url', '')
+        api_key    = payload.get('api_key', '')
+        api_type   = payload.get('api_type', 'openai')
+
+        if not base_url or not api_key:
+            raise ValueError("base_url 和 api_key 不能为空")
+        if not model_path:
+            raise ValueError("model_path 不能为空")
+
+        model_id = model_path.split('/')[-1] if '/' in model_path else model_path
+        timeout = aiohttp.ClientTimeout(total=120)
+
+        if api_type == 'anthropic':
+            headers = {
+                'Content-Type': 'application/json',
+                'x-api-key': api_key,
+                'anthropic-version': '2023-06-01',
+            }
+            body = {'model': model_id, 'messages': messages, 'max_tokens': 4096}
+            url = base_url.rstrip('/') + '/v1/messages'
+        else:
+            headers = {
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {api_key}',
+            }
+            body = {'model': model_id, 'messages': messages, 'max_tokens': 4096}
+            url = base_url.rstrip('/') + '/v1/chat/completions'
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, headers=headers, json=body, ssl=False) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise ValueError(f"AI API 返回 {resp.status}: {text[:300]}")
+                data = await resp.json()
+
+        if api_type == 'anthropic':
+            content = ''.join(c.get('text', '') for c in data.get('content', []))
+        else:
+            content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+
         return {
-            "model": model,
-            "response": "AI处理结果示例",
-            "usage": {"tokens": 100}
+            'content': content,
+            'model': model_path,
+            'usage': data.get('usage', {}),
         }
 
     async def _process_script_task(self, task: Task) -> Dict[str, Any]:
@@ -711,7 +749,7 @@ class BridgeService:
 
             # ── 未配置 node_key：轮询等待登录 ─────────────────────
             if not self.node_key:
-                logger.info("⏳ node_key 未配置，等待本地登录... (访问 http://localhost:8888)")
+                logger.info("⏳ node_key 未配置，等待本地登录... (访问 http://localhost:8890)")
                 await asyncio.sleep(3)
                 # 尝试从文件重读（用户可能在等待期间完成登录）
                 self._reload_config_from_file()
@@ -886,7 +924,7 @@ class BridgeService:
 
     async def _start_local_ui(self):
         """
-        本地 WebUI 服务（8888 端口）
+        本地 WebUI 服务（8890 端口）
 
         路由：
           GET  /              — 登录/状态页面（纯 HTML，无文件挂载）
@@ -1073,11 +1111,11 @@ pollStatus();
 
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', 8888)
+        site = web.TCPSite(runner, '0.0.0.0', 8890)
         await site.start()
 
         self._start_time = time.time()
-        logger.info("🌐 本地 WebUI 已启动: http://localhost:8888")
+        logger.info("🌐 本地 WebUI 已启动: http://localhost:8890")
 
         # 保持协程存活
         while self.running:
@@ -1347,7 +1385,7 @@ async def main():
         # bridge.start() 内部已包含：
         #   _start_task_processor / _start_status_monitor / _start_cleanup_worker
         #   _start_websocket_client / _collect_system_metrics
-        #   _start_local_ui  (8888 端口，阶段三新增)
+        #   _start_local_ui  (8890 端口，阶段三新增)
         await bridge.start()
     except KeyboardInterrupt:
         logger.info("收到中断信号，正在停止服务...")
